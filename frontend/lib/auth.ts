@@ -310,3 +310,28 @@ export async function fetchUserProfile(userId: string): Promise<Profile | null> 
     return null;
   }
 }
+
+/**
+ * Send password reset email for forgotten passwords
+ */
+export async function requestPasswordReset(email: string): Promise<{ success: boolean; error?: string }> {
+  const cleanEmail = email.trim();
+  if (!cleanEmail) {
+    return { success: false, error: 'Please enter your email address.' };
+  }
+
+  const supabase = getSupabaseBrowserClient();
+  const redirectOrigin =
+    process.env.NEXT_PUBLIC_APP_URL ||
+    (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
+
+  const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+    redirectTo: `${redirectOrigin.replace(/\/$/, '')}/`,
+  });
+
+  if (error) {
+    return { success: false, error: error.message };
+  }
+
+  return { success: true };
+}

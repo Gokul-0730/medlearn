@@ -314,23 +314,35 @@ export default function Home() {
       let errorCategory: "NETWORK_ERROR" | "BACKEND_ERROR" | "DATABASE_ERROR" | "REQUEST_TIMEOUT" = "NETWORK_ERROR";
       let errorDetails = "";
 
+      const currentHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
+      const isLocalhostClient = currentHost === "localhost" || currentHost === "127.0.0.1";
       const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
-      const primaryEndpoint = apiUrl
-        ? `${apiUrl.replace(/\/$/, "")}/api/chat`
-        : isHttps
-        ? "/api/chat"
-        : "http://localhost:8080/api/chat";
-      const endpointsToTry = Array.from(new Set([
-        primaryEndpoint,
-        "/api/chat",
-        ...(isHttps ? [] : ["http://localhost:8080/api/chat", "http://127.0.0.1:8080/api/chat"]),
-      ]));
 
-      for (const endpoint of endpointsToTry) {
-        console.log(`[FRONTEND] Sending request → ${endpoint}`);
+      // Prioritize same-origin proxy /api/chat:
+      // It avoids CORS entirely, works on mobile Wi-Fi IPs, and routes through Next.js proxy
+      const endpointsToTry: string[] = ["/api/chat"];
+
+      if (apiUrl) {
+        const cleanApiUrl = apiUrl.replace(/\/$/, "");
+        if (cleanApiUrl.startsWith("http")) {
+          if (!cleanApiUrl.includes("localhost") || isLocalhostClient) {
+            endpointsToTry.unshift(`${cleanApiUrl}/api/chat`);
+          }
+        }
+      }
+
+      if (isLocalhostClient && !isHttps) {
+        endpointsToTry.push("http://localhost:8080/api/chat", "http://127.0.0.1:8080/api/chat");
+      }
+
+      const uniqueEndpoints = Array.from(new Set(endpointsToTry));
+      const diagnosticErrors: Array<{ url: string; error: string; details: any }> = [];
+
+      for (const endpoint of uniqueEndpoints) {
+        console.log(`[FRONTEND] Trying chat endpoint → ${endpoint}`);
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 15000);
+          const timeoutId = setTimeout(() => controller.abort(), 25000);
 
           const res = await fetch(endpoint, {
             method: "POST",
@@ -352,12 +364,18 @@ export default function Home() {
             break;
           } else {
             const errorText = await res.text().catch(() => "");
-            console.error("[FRONTEND] API ERROR:", {
+            console.warn("[FRONTEND] API Non-200 Response:", {
               url: endpoint,
               method: "POST",
               status: res.status,
               statusText: res.statusText,
               body: errorText,
+            });
+
+            diagnosticErrors.push({
+              url: endpoint,
+              error: `HTTP ${res.status}: ${res.statusText}`,
+              details: errorText,
             });
 
             if (res.status >= 500) {
@@ -379,24 +397,49 @@ export default function Home() {
           }
         } catch (fetchErr: any) {
           const isTimeout = fetchErr?.name === "AbortError";
-          console.error("[FRONTEND] NETWORK/API ERROR:", {
+          const isOnline = typeof navigator !== "undefined" ? navigator.onLine : true;
+          const currentOrigin = typeof window !== "undefined" ? window.location.origin : "";
+          const isMixedContent = isHttps && endpoint.startsWith("http://");
+
+          const diagInfo = {
             url: endpoint,
             method: "POST",
             error: fetchErr?.message || "Failed to fetch",
-            timeout: isTimeout,
+            errorName: fetchErr?.name,
+            status: 0,
+            statusText: isTimeout ? "Timeout (25s)" : "Failed to fetch (Network / CORS)",
+            isTimeout,
+            isOnline,
+            currentOrigin,
+            isMixedContent,
+            suggestedFix: isTimeout
+              ? "Backend is taking more than 25s to process medical query"
+              : !isOnline
+              ? "Device appears to have lost network connection"
+              : isMixedContent
+              ? "Cannot fetch insecure http endpoint from an https page (Mixed Content)"
+              : "Backend on port 8080 may be unreachable or CORS preflight was rejected",
+          };
+
+          console.warn(`[FRONTEND] Endpoint attempt failed (Status 0): ${endpoint}`, diagInfo);
+          diagnosticErrors.push({
+            url: endpoint,
+            error: fetchErr?.message || "Failed to fetch",
+            details: diagInfo,
           });
 
           if (isTimeout) {
             errorCategory = "REQUEST_TIMEOUT";
-            errorDetails = "Server is taking too long to respond (timeout 15s)";
+            errorDetails = "Server is taking too long to respond (timeout 25s)";
           } else {
             errorCategory = "NETWORK_ERROR";
-            errorDetails = fetchErr?.message || "Connection refused";
+            errorDetails = fetchErr?.message || "Connection refused or CORS rejected";
           }
         }
       }
 
       if (!response || !response.ok) {
+        console.error("[FRONTEND] ALL CHAT ENDPOINTS FAILED:", diagnosticErrors);
         setBackendOnline(false);
         const userFacingMessage =
           errorCategory === "REQUEST_TIMEOUT"
@@ -3378,7 +3421,8 @@ function HealthDashboard({
   const fetchVitals = async () => {
     setSyncing(true);
     try {
-      const res = await fetch(`${apiUrl}/api/clinical/wearables/vitals`);
+      const target = apiUrl ? `${apiUrl.replace(/\/$/, "")}/api/clinical/wearables/vitals` : "/api/clinical/wearables/vitals";
+      const res = await fetch(target).catch(() => fetch("/api/clinical/wearables/vitals"));
       if (res.ok) {
         const data = await res.json();
         setVitals(data);
@@ -3392,7 +3436,8 @@ function HealthDashboard({
 
   const fetchTips = async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/clinical/health-tips`);
+      const target = apiUrl ? `${apiUrl.replace(/\/$/, "")}/api/clinical/health-tips` : "/api/clinical/health-tips";
+      const res = await fetch(target).catch(() => fetch("/api/clinical/health-tips"));
       if (res.ok) {
         const data = await res.json();
         setTips(data);
@@ -3584,13 +3629,22 @@ function MedicationTracker({
     }
 
     try {
-      const res = await fetch(`${apiUrl}/api/clinical/drug-interactions`, {
+      const target = apiUrl ? `${apiUrl.replace(/\/$/, "")}/api/clinical/drug-interactions` : "/api/clinical/drug-interactions";
+      const res = await fetch(target, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           medications: medications.map((m) => m.name),
         }),
-      });
+      }).catch(() =>
+        fetch("/api/clinical/drug-interactions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            medications: medications.map((m) => m.name),
+          }),
+        })
+      );
 
       if (res.ok) {
         const data = await res.json();
@@ -3775,7 +3829,8 @@ function DoctorDirectory({
 
   const fetchDoctors = async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/clinical/doctors`);
+      const target = apiUrl ? `${apiUrl.replace(/\/$/, "")}/api/clinical/doctors` : "/api/clinical/doctors";
+      const res = await fetch(target).catch(() => fetch("/api/clinical/doctors"));
       if (res.ok) {
         const data = await res.json();
         setDoctors(data);

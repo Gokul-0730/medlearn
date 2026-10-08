@@ -16,17 +16,18 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/emergency")
 @CrossOrigin(
-    origins = {
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://[::1]:3000"
-    },
     originPatterns = {
         "http://localhost:[*]",
-        "http://127.0.0.1:[*]"
-    }
+        "http://127.0.0.1:[*]",
+        "http://10.*.*.*:[*]",
+        "http://192.168.*.*:[*]",
+        "http://172.*.*.*:[*]",
+        "https://*.vercel.app",
+        "https://*-[a-zA-Z0-9]+-*.vercel.app",
+        "https://medlearn.com",
+        "https://*.medlearn.com"
+    },
+    allowCredentials = "true"
 )
 public class EmergencyController {
 
