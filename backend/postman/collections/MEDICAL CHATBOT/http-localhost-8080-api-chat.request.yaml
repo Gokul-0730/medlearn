@@ -1,0 +1,11 @@
+$kind: http-request
+name: http://localhost:8080/api/chat
+description: ""
+url: http://localhost:8080/api/chat
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: '{"message": "What are the early signs of a heart attack?"}'
+order: 1789040405165
