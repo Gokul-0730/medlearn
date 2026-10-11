@@ -34,6 +34,14 @@ type Message = {
   subject?: string;
   confidence?: string;
   ragSources?: string[];
+  sources?: Array<{
+    documentId?: string | number;
+    title?: string;
+    subject?: string;
+    topic?: string;
+    sourceName?: string;
+    relevanceScore?: number;
+  }>;
   retrievedChunksCount?: number;
   intent?: string;
   imagePreview?: string;
@@ -526,6 +534,7 @@ export default function Home() {
           subject: data.subject,
           confidence: data.confidence,
           ragSources: data.ragSources || [],
+          sources: data.sources || [],
           retrievedChunksCount: data.retrievedChunksCount,
           intent: data.intent,
         },
@@ -1434,6 +1443,7 @@ function ChatScreen({
                       relatedTopics={msg.relatedTopics}
                       confidence={msg.confidence}
                       ragSources={msg.ragSources}
+                      sources={msg.sources}
                       intent={msg.intent}
                       lang={lang}
                       onSelectTopic={(t) => {
@@ -1616,6 +1626,7 @@ function MedicalAnswerRenderer({
   relatedTopics,
   confidence,
   ragSources,
+  sources,
   intent,
   onSelectTopic,
   lang,
@@ -1624,6 +1635,14 @@ function MedicalAnswerRenderer({
   relatedTopics?: string[];
   confidence?: string;
   ragSources?: string[];
+  sources?: Array<{
+    documentId?: string | number;
+    title?: string;
+    subject?: string;
+    topic?: string;
+    sourceName?: string;
+    relevanceScore?: number;
+  }>;
   intent?: string;
   onSelectTopic: (topic: string) => void;
   lang?: Language;
@@ -2046,6 +2065,19 @@ function MedicalAnswerRenderer({
               <div style={{ marginTop: "4px", fontSize: "11px", color: "#64748b" }}>
                 <span>Primary Sources: </span>
                 {ragSources.join(" • ")}
+              </div>
+            )}
+            {sources && sources.length > 0 && (
+              <div style={{ marginTop: "8px", borderTop: "1px solid rgba(0,0,0,0.06)", paddingTop: "8px" }}>
+                <strong style={{ fontSize: "11px", color: "#334155" }}>Verified Database Sources & Citations:</strong>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "4px" }}>
+                  {sources.map((s, idx) => (
+                    <div key={idx} style={{ fontSize: "11px", background: "rgba(255,255,255,0.7)", padding: "6px 8px", borderRadius: "8px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                      <div style={{ fontWeight: 600, color: "#1e293b" }}>[{s.documentId}] {s.title}</div>
+                      <div style={{ color: "#64748b", fontSize: "10.5px" }}>{s.sourceName} • {s.subject} ({s.topic})</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

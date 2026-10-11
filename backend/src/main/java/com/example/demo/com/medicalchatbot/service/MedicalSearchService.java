@@ -6,10 +6,7 @@ import com.example.demo.com.medicalchatbot.model.SearchResult;
 import com.example.demo.com.medicalchatbot.repository.MedicalKnowledgeRepository;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 
 @Service
 public class MedicalSearchService {
@@ -17,21 +14,37 @@ public class MedicalSearchService {
     private final MedicalKnowledgeRepository repository;
     private final QuestionAnalyzer questionAnalyzer;
     private final MedicalResponseFormatter responseFormatter;
+    private final HybridSearchService hybridSearchService;
+    private final RagAnswerService ragAnswerService;
+    private final SourceCitationService sourceCitationService;
+    private final EmbeddingService embeddingService;
 
     public MedicalSearchService(
             MedicalKnowledgeRepository repository,
             QuestionAnalyzer questionAnalyzer,
-            MedicalResponseFormatter responseFormatter) {
+            MedicalResponseFormatter responseFormatter,
+            HybridSearchService hybridSearchService,
+            RagAnswerService ragAnswerService,
+            SourceCitationService sourceCitationService,
+            EmbeddingService embeddingService) {
         this.repository = repository;
         this.questionAnalyzer = questionAnalyzer;
         this.responseFormatter = responseFormatter;
+        this.hybridSearchService = hybridSearchService;
+        this.ragAnswerService = ragAnswerService;
+        this.sourceCitationService = sourceCitationService;
+        this.embeddingService = embeddingService;
     }
 
     /**
-     * Advanced RAG Pipeline Execution:
-     * 1. Multi-Document Cluster Retrieval
-     * 2. Context Augmentation & Entity Alignment
-     * 3. Clinical Synthesis Generation with Citations
+     * Complete Production-Ready RAG Search Pipeline:
+     * 1. Query Normalization & Question Intent Analysis
+     * 2. Medical Synonym & Terminology Expansion
+     * 3. Hybrid Multi-Signal Retrieval (FTS + Exact + Trigram + pgvector)
+     * 4. Multi-Document Deduplication & Precision Reranking
+     * 5. Context Construction & Source Attribution
+     * 6. Grounded Clinical Synthesis (LLM / Structured Formatter)
+     * 7. Citation Validation & Source Metadata Attachment
      */
     public SearchResult searchDetailed(String userQuestion) {
         return searchDetailed(userQuestion, null);
@@ -48,33 +61,34 @@ public class MedicalSearchService {
         }
 
         String originalQuestion = userQuestion.trim();
+
+        // 1. QUESTION UNDERSTANDING & INTENT ANALYSIS
         QuestionAnalysis analysis = questionAnalyzer.analyze(originalQuestion, language);
 
-        // -------------------------------------------------------------
-        // 1. RETRIEVAL: Fetch multi-document knowledge cluster (RAG)
-        // -------------------------------------------------------------
-        System.out.println("[BACKEND] Processing medical query: " + originalQuestion);
-        System.out.println("[ANALYSIS] Entity=" + analysis.getCoreEntity() + ", Aspect=" + analysis.getAspect() + ", Subtopic=" + analysis.getSubtopic() + ", SafetyCritical=" + analysis.isSafetyCritical());
+        System.out.println("[RAG] Processing query: '" + originalQuestion + "' | Entity=" + analysis.getCoreEntity() + " | Intent=" + analysis.getIntent() + " | Aspect=" + analysis.getAspect());
 
-        List<MedicalEntry> cluster = repository.retrieveRagCluster(analysis, originalQuestion, 5);
+        // 2. HYBRID MULTI-SIGNAL RETRIEVAL & RERANKING
+        List<MedicalEntry> cluster = hybridSearchService.searchHybrid(originalQuestion, analysis, 6);
 
+        // 3. EMPTY RESULT / INSUFFICIENT RELEVANCE HANDLING
         if (cluster == null || cluster.isEmpty()) {
-            System.out.println("[DATABASE] No candidate records found above relevance cutoff in Supabase.");
-            String fallbackMsg = "ta".equalsIgnoreCase(analysis.getLanguage())
-                    ? "மன்னிக்கவும், உங்கள் கேள்விக்குரிய தொடர்புடைய மருத்துவத் தகவல்கள் தரவுத்தளத்தில் கண்டறியப்படவில்லை. தயவுசெய்து கேள்வியை இன்னும் தெளிவாகக் குறிப்பிடவும்."
-                    : "tanglish".equalsIgnoreCase(analysis.getLanguage())
-                    ? "Mannikkavum, ungal kelvikku sariyana medical thagaval kidaikkavillai. Kelviyai thelivaga kettu paarungal."
-                    : "Sorry, I could not find a sufficiently relevant answer in the medical knowledge database for this query.";
-            return new SearchResult(null, null, fallbackMsg, "LOW", new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), analysis, 0.0, "NO_MATCH", "No matching records found in database", "Empty candidate set");
+            System.out.println("[RAG] Retrieval returned no candidates above relevance threshold.");
+            String emptyFallback = ragAnswerService.generateGroundedAnswer(originalQuestion, Collections.emptyList(), null, analysis, Collections.emptyList());
+            SearchResult emptyResult = new SearchResult(
+                    null, null, emptyFallback, "LOW",
+                    new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
+                    analysis, 0.0, "HYBRID_NO_MATCH", "Empty candidate set", "Insufficient evidence in database"
+            );
+            emptyResult.setGrounded(false);
+            return emptyResult;
         }
 
-        System.out.println("[DATABASE] Retrieved " + cluster.size() + " grounded candidates from Supabase");
+        System.out.println("[RAG] Retrieved " + cluster.size() + " grounded clinical evidence chunks.");
 
         MedicalEntry bestMatch = cluster.get(0);
-        Double score = bestMatch.getRelevanceScore();
-        double finalScore = score != null ? score : 0.0;
+        double finalScore = bestMatch.getRelevanceScore() != null ? bestMatch.getRelevanceScore() : 0.0;
 
-        // Calculate RAG Confidence
+        // Calculate Confidence Level
         String confidence;
         if (analysis != null && analysis.isSafetyCritical() && finalScore < 60.0) {
             confidence = "LOW";
@@ -86,29 +100,21 @@ public class MedicalSearchService {
             confidence = "LOW";
         }
 
-        System.out.println("[RERANK] Best candidate ID=" + bestMatch.getId() + ", Topic=" + bestMatch.getTopic() + ", Score=" + finalScore + ", Confidence=" + confidence);
+        // 4. CITATIONS & RELATED TOPICS EXTRACTION
+        List<Map<String, Object>> structuredSources = sourceCitationService.extractStructuredSources(cluster);
+        List<String> sourceNames = sourceCitationService.extractUniqueSourceNames(cluster);
 
-        // -------------------------------------------------------------
-        // 2. AUGMENTATION: Cross-reference topics and citations
-        // -------------------------------------------------------------
-        List<MedicalEntry> alternatives = new ArrayList<>();
         Set<String> relatedTopicNames = new LinkedHashSet<>();
-        List<String> sources = new ArrayList<>();
-
+        List<MedicalEntry> alternatives = new ArrayList<>();
         for (int i = 0; i < cluster.size(); i++) {
             MedicalEntry entry = cluster.get(i);
             if (i > 0) alternatives.add(entry);
-
             if (entry.getTopic() != null && !entry.getTopic().equalsIgnoreCase(bestMatch.getTopic())) {
                 relatedTopicNames.add(entry.getTopic());
             }
-
-            if (entry.getSource() != null && !sources.contains(entry.getSource())) {
-                sources.add(entry.getSource());
-            }
         }
 
-        // Definition entry if available
+        // Definition entry for entity anchoring
         MedicalEntry definitionEntry = null;
         if (analysis.getCoreEntity() != null && !analysis.getCoreEntity().isEmpty()) {
             definitionEntry = repository.findDefinitionForTopic(analysis.getCoreEntity());
@@ -117,38 +123,27 @@ public class MedicalSearchService {
             definitionEntry = repository.findDefinitionForTopic(bestMatch.getTopic());
         }
 
-        // -------------------------------------------------------------
-        // 3. GENERATION: Multi-document RAG clinical synthesis
-        // -------------------------------------------------------------
-        String formattedAnswer;
-        if ("LOW".equals(confidence) && finalScore < 35.0) {
-            formattedAnswer = "ta".equalsIgnoreCase(analysis.getLanguage())
-                    ? "மன்னிக்கவும், உங்கள் கேள்விக்குரிய போதுமான அளவு சரிபார்க்கப்பட்ட மருத்துவத் தகவல்கள் தரவுத்தளத்தில் கண்டறியப்படவில்லை. மருத்துவ வழிகாட்டுதலுக்குத் தகுதிவாய்ந்த மருத்துவரை அணுகவும்."
-                    : "tanglish".equalsIgnoreCase(analysis.getLanguage())
-                    ? "Mannikkavum, ungal kelvikku podhumaana verified medical thagaval kidaikkavillai. Dayaivu seidhu doctor-ai consult seiyavum."
-                    : "I could not find a sufficiently verified answer in the medical knowledge database for this query. For clinical concerns, please consult a verified healthcare professional.";
-        } else {
-            formattedAnswer = responseFormatter.formatRag(
-                    cluster,
-                    definitionEntry,
-                    analysis,
-                    new ArrayList<>(relatedTopicNames)
-            );
-        }
+        // 5. GROUNDED ANSWER GENERATION
+        String formattedAnswer = ragAnswerService.generateGroundedAnswer(
+                originalQuestion,
+                cluster,
+                definitionEntry,
+                analysis,
+                new ArrayList<>(relatedTopicNames)
+        );
 
-        String retrievalMethod = (analysis != null && analysis.isDrug())
-                ? "DRUG_LOOKUP"
-                : (analysis != null && !"DEFINITION".equalsIgnoreCase(analysis.getAspect()) && !"GENERAL".equalsIgnoreCase(analysis.getAspect()))
-                ? "TARGETED_ASPECT (" + analysis.getAspect() + ")"
-                : "HYBRID_RERANKED";
+        String retrievalMethod = embeddingService.isAvailable()
+                ? "HYBRID (pgvector Cosine + PostgreSQL FTS + Trigram + Exact Match)"
+                : "HYBRID (PostgreSQL FTS + Trigram + Exact Match + Synonym Expansion)";
 
-        String scoreBreakdown = "ExactMatch(30%) + Keyword(20%) + SemanticOverlap(30%) + TopicMatch(10%) + Subject(5%) + SourceQuality(5%)";
-        String debugLog = "Entity=" + (analysis != null ? analysis.getCoreEntity() : "None")
+        String scoreBreakdown = "ExactMatch(25%) + FullText(25%) + TrigramOverlap(15%) + SemanticVector(25%) + MetadataQuality(10%)";
+        String debugLog = "Entity=" + analysis.getCoreEntity()
                 + " | BestScore=" + finalScore
                 + " | Candidates=" + cluster.size()
+                + " | pgvector=" + (embeddingService.isAvailable() ? "ACTIVE" : "STANDBY")
                 + " | Method=" + retrievalMethod;
 
-        return new SearchResult(
+        SearchResult result = new SearchResult(
                 bestMatch,
                 definitionEntry,
                 formattedAnswer,
@@ -156,13 +151,17 @@ public class MedicalSearchService {
                 new ArrayList<>(relatedTopicNames),
                 alternatives,
                 cluster,
-                sources,
+                sourceNames,
                 analysis,
                 finalScore,
                 retrievalMethod,
                 scoreBreakdown,
                 debugLog
         );
+
+        result.setSources(structuredSources);
+        result.setGrounded(true);
+        return result;
     }
 
     public MedicalEntry search(String userQuestion) {

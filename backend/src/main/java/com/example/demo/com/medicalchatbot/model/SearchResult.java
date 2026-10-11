@@ -20,6 +20,8 @@ public class SearchResult {
     private String retrievalMethod = "Hybrid (Exact + Lexical + Semantic + Full-Text)";
     private Map<String, Object> scoreBreakdown = new HashMap<>();
     private String debugLog;
+    private List<Map<String, Object>> sources = new ArrayList<>();
+    private boolean grounded = true;
 
     public SearchResult() {
     }
@@ -177,5 +179,21 @@ public class SearchResult {
 
     public void setDebugLog(String debugLog) {
         this.debugLog = debugLog;
+    }
+
+    public List<Map<String, Object>> getSources() {
+        return sources != null ? sources : new ArrayList<>();
+    }
+
+    public void setSources(List<Map<String, Object>> sources) {
+        this.sources = sources;
+    }
+
+    public boolean isGrounded() {
+        return grounded;
+    }
+
+    public void setGrounded(boolean grounded) {
+        this.grounded = grounded;
     }
 }

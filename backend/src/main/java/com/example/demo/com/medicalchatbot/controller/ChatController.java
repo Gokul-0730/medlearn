@@ -112,6 +112,8 @@ public class ChatController {
             response.put("scoreBreakdown", searchResult.getScoreBreakdown());
             response.put("relatedTopics", new java.util.ArrayList<>(localizedTopics));
             response.put("ragSources", searchResult.getRagSources());
+            response.put("sources", searchResult.getSources());
+            response.put("grounded", searchResult.isGrounded());
             response.put("retrievedChunksCount", searchResult.getRagCluster() != null ? searchResult.getRagCluster().size() : 1);
 
             if (entry != null) {
