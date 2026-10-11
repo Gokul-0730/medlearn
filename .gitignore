@@ -12,7 +12,7 @@ dist/
 
 # Env & Secrets
 .env*
-!.env.example
+!.env*.example
 *.log
 
 # IDE & OS
