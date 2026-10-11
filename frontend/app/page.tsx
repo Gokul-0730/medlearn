@@ -921,23 +921,6 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Live Backend Connection Indicator */}
-          <div
-            className={`topbar-backend-badge ${backendOnline === true ? "online" : backendOnline === false ? "offline" : "checking"}`}
-            title={
-              backendOnline === true
-                ? "Spring Boot Backend Online — RAG & Supabase Active"
-                : backendOnline === false
-                ? "Spring Boot Backend is Offline or unreachable"
-                : "Checking connection to Spring Boot backend..."
-            }
-          >
-            <span className="backend-badge-dot" />
-            <span className="backend-badge-text">
-              {backendOnline === true ? "Backend Active" : backendOnline === false ? "Backend Offline" : "Checking..."}
-            </span>
-          </div>
-
           <UserProfileMenu />
         </div>
       </header>
@@ -1798,18 +1781,10 @@ function MedicalAnswerRenderer({
 
   return (
     <div className="medical-answer-wrapper">
-      {/* Top Action Bar with RAG badge, Listen & Copy */}
+      {/* Top Action Bar with Sources, Listen & Copy */}
       <div className="message-header-bar">
-        <div className="message-badge-group">
-          <span className="rag-confidence-badge">
-            ⚡{" "}
-            {confidence === "HIGH"
-              ? isTamilContent ? "98% துல்லிய நம்பிக்கை" : "98% RAG Confidence"
-              : confidence === "MEDIUM"
-              ? isTamilContent ? "85% பொருந்தும் நம்பிக்கை" : "85% RAG Match"
-              : isTamilContent ? "தொகுக்கப்பட்ட பதில்" : "RAG Synthesized"}
-          </span>
-          {ragSources && ragSources.length > 0 && (
+        {ragSources && ragSources.length > 0 ? (
+          <div className="message-badge-group">
             <span className="rag-sources-count">
               📚 {ragSources.length}{" "}
               {isTamilContent
@@ -1818,8 +1793,8 @@ function MedicalAnswerRenderer({
                 ? "Sources"
                 : ragSources.length === 1 ? "Source" : "Sources"}
             </span>
-          )}
-        </div>
+          </div>
+        ) : <div />}
 
         <div className="message-actions">
           <button
@@ -2059,12 +2034,6 @@ function MedicalAnswerRenderer({
             <div className="xai-metric-row">
               <span className="xai-metric">
                 Intent: <strong>{intent || "Clinical Concept"}</strong>
-              </span>
-              <span className="xai-metric">
-                Confidence:{" "}
-                <strong style={{ color: "#16a34a" }}>
-                  {confidence === "HIGH" ? "98%" : "85%"}
-                </strong>
               </span>
             </div>
             <p className="xai-rationale-text">
