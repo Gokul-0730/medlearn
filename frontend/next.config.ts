@@ -9,7 +9,7 @@ const backendUrl =
   process.env.BACKEND_API_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
   (isProduction
-    ? "https://beaches-sustainable-publications-concerns.trycloudflare.com"
+    ? "https://jump-screenshot-sale-jonathan.trycloudflare.com"
     : "http://127.0.0.1:8080");
 
 const nextConfig: NextConfig = {
