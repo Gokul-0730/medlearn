@@ -10,7 +10,7 @@ import {
 } from "../lib/auth";
 
 export function AuthScreen() {
-  const { signIn, signUp } = useAuth();
+  const { signIn, signUp, continueAsGuest } = useAuth();
   const [mode, setMode] = useState<"login" | "register">("login");
 
   // Form states
@@ -393,6 +393,32 @@ export function AuthScreen() {
             </div>
           </form>
         )}
+
+        {/* Instant Guest Demo Access */}
+        <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid rgba(255,255,255,0.2)", textAlign: "center" }}>
+          <button
+            type="button"
+            onClick={() => continueAsGuest()}
+            style={{
+              width: "100%",
+              padding: "11px 16px",
+              background: "rgba(16, 185, 129, 0.12)",
+              border: "1px solid rgba(16, 185, 129, 0.35)",
+              borderRadius: "12px",
+              color: "#047857",
+              fontWeight: 600,
+              fontSize: "14px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              transition: "all 0.2s ease",
+            }}
+          >
+            <span>⚡</span> Explore as Guest (Instant Access)
+          </button>
+        </div>
       </div>
     </div>
   );

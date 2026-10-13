@@ -1,9 +1,16 @@
 import type { NextConfig } from "next";
 
+const isProduction =
+  process.env.NODE_ENV === "production" ||
+  Boolean(process.env.VERCEL) ||
+  Boolean(process.env.NEXT_PUBLIC_VERCEL_ENV);
+
 const backendUrl =
   process.env.BACKEND_API_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
-  "http://127.0.0.1:8080";
+  (isProduction
+    ? "https://beaches-sustainable-publications-concerns.trycloudflare.com"
+    : "http://127.0.0.1:8080");
 
 const nextConfig: NextConfig = {
   async rewrites() {
