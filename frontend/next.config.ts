@@ -8,15 +8,16 @@ const isProduction =
 const backendUrl =
   process.env.BACKEND_API_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
-  (isProduction
-    ? "https://jump-screenshot-sale-jonathan.trycloudflare.com"
-    : "http://127.0.0.1:8080");
+  (!isProduction ? "http://127.0.0.1:8080" : "");
 
 const nextConfig: NextConfig = {
   async rewrites() {
+    if (!backendUrl) {
+      return [];
+    }
     return [
       {
-        source: "/api/:path*",
+        source: "/api/proxy/:path*",
         destination: `${backendUrl.replace(/\/$/, "")}/api/:path*`,
       },
     ];
