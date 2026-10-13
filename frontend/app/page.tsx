@@ -191,6 +191,22 @@ export default function Home() {
       clearInterval(timer);
     };
   }, [apiUrl]);
+
+  // Prevent background scrolling while mobile sidebar is open, and restore when closed
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (menuOpen) {
+      const prevOverflow = document.body.style.overflow;
+      const prevTouchAction = document.body.style.touchAction;
+      document.body.style.overflow = "hidden";
+      document.body.style.touchAction = "none";
+      return () => {
+        document.body.style.overflow = prevOverflow;
+        document.body.style.touchAction = prevTouchAction;
+      };
+    }
+  }, [menuOpen]);
+
   const recognitionRef = useRef<any>(null);
   const lastInputWasVoice = useRef(false);
 

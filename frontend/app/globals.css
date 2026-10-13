@@ -1646,17 +1646,14 @@ button:disabled {
 
 @media (max-width: 600px) {
   .topbar {
-    height: 60px;
-
-    padding: 0 13px;
+    height: calc(62px + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: 12px;
+    padding-right: 12px;
   }
 
   .content {
-    padding-top: 60px;
-  }
-
-  .profile-name {
-    display: none;
+    padding-top: calc(62px + env(safe-area-inset-top, 0px));
   }
 
   .mobile-brand {
@@ -1664,12 +1661,15 @@ button:disabled {
   }
 
   .sidebar {
-    top: max(10px, env(safe-area-inset-top, 10px));
-    left: max(10px, env(safe-area-inset-left, 10px));
-    height: calc(100vh - max(20px, env(safe-area-inset-top, 10px) + env(safe-area-inset-bottom, 10px)));
-    width: min(310px, calc(100vw - 20px));
-    border-radius: 24px !important;
-    padding: 18px 14px calc(18px + env(safe-area-inset-bottom, 0px)) 14px;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    width: min(320px, 86vw) !important;
+    border-radius: 0 24px 24px 0 !important;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(24px + env(safe-area-inset-bottom, 0px)) 16px !important;
     transform: translateX(calc(-100% - 24px));
   }
 
@@ -7432,103 +7432,443 @@ textarea {
   }
 }
 
-/* MOBILE PHONES (<= 768px) */
+/* =========================================================
+   MOBILE RESPONSIVE SYSTEM (<= 768px, <= 480px, <= 360px)
+   Polished alignment for Header, Language Switcher, Profile Toggle,
+   Mobile Sidebar Foreground Drawer, and Homepage Content
+========================================================= */
+
+/* MOBILE DEVICES (<= 768px) */
 @media (max-width: 768px) {
+  /* 1. TOPBAR HEADER ALIGNMENT */
   .topbar {
-    height: 62px;
-    padding: 0 12px;
+    height: calc(64px + env(safe-area-inset-top, 0px)) !important;
+    padding-top: env(safe-area-inset-top, 0px) !important;
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 8px !important;
+    z-index: 50 !important;
+    box-sizing: border-box !important;
   }
 
   .content {
-    padding-top: 62px;
+    padding-top: calc(64px + env(safe-area-inset-top, 0px)) !important;
+  }
+
+  .menu-button {
+    width: 38px !important;
+    height: 38px !important;
+    font-size: 20px !important;
+    border-radius: 10px !important;
+    flex-shrink: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .mobile-brand {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    margin-left: 2px !important;
+    flex-shrink: 1 !important;
+    min-width: 0 !important;
+  }
+
+  .mobile-brand span {
+    font-size: 19px !important;
+  }
+
+  .mobile-brand strong {
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    white-space: nowrap !important;
+    letter-spacing: -0.01em !important;
+  }
+
+  /* Right-hand controls container */
+  .topbar-right {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+    gap: 8px !important;
+    margin-left: auto !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* 2. REPOSITION LANGUAGE SELECTOR SLIGHTLY DOWNWARD & PREVENT CLIPPING */
+  .topbar-lang-toggle {
+    display: inline-flex !important;
+    align-items: center !important;
+    margin-top: 4px !important; /* Slightly downward */
+    margin-bottom: 0 !important;
+    margin-right: 0 !important;
+    padding: 3px 6px !important;
+    gap: 2px !important;
+    flex-shrink: 0 !important;
+    box-sizing: border-box !important;
+  }
+
+  .topbar-lang-btn {
+    font-size: 11px !important;
+    padding: 3px 6px !important;
+    font-weight: 600 !important;
+    line-height: 1.2 !important;
+    min-width: unset !important;
+  }
+
+  .topbar-lang-sep {
+    font-size: 10px !important;
+    opacity: 0.35 !important;
+    margin: 0 1px !important;
+  }
+
+  /* 3. REPOSITION GOKUL / PROFILE TOGGLE SLIGHTLY RIGHT & SLIGHTLY DOWNWARD */
+  .user-profile-menu-container {
+    position: relative !important;
+    margin-top: 4px !important; /* Slightly downward */
+    margin-right: -2px !important; /* Slightly to the right */
+    flex-shrink: 0 !important;
+  }
+
+  .profile-button {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 5px !important;
+    padding: 3px 8px 3px 4px !important;
+    border-radius: 999px !important;
+    background: rgba(255, 255, 255, 0.45) !important;
+    border: 1px solid rgba(255, 255, 255, 0.70) !important;
+    backdrop-filter: blur(14px) !important;
+    -webkit-backdrop-filter: blur(14px) !important;
+    cursor: pointer !important;
+  }
+
+  .profile-avatar {
+    width: 26px !important;
+    height: 26px !important;
+    font-size: 11.5px !important;
+    font-weight: 700 !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* Keep Gokul / User name visible, neat, and non-overlapping */
+  .profile-name {
+    display: inline-block !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    color: #334155 !important;
+    max-width: 58px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    line-height: 1 !important;
+  }
+
+  .profile-dropdown-glass {
+    position: absolute !important;
+    top: calc(100% + 8px) !important;
+    right: 0 !important;
+    left: auto !important;
+    width: min(270px, calc(100vw - 20px)) !important;
+    max-width: calc(100vw - 20px) !important;
+    z-index: 120 !important;
+    box-sizing: border-box !important;
+  }
+
+  /* 4. MOBILE SIDEBAR OVERLAY & FOREGROUND DRAWER */
+  .sidebar-overlay {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 99 !important;
+    background: rgba(15, 23, 42, 0.45) !important;
+    backdrop-filter: blur(14px) saturate(150%) !important;
+    -webkit-backdrop-filter: blur(14px) saturate(150%) !important;
+    transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
   }
 
   .sidebar {
-    width: min(300px, calc(100vw - 28px));
+    position: fixed !important;
+    z-index: 100 !important;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    width: min(320px, 86vw) !important;
+    margin: 0 !important;
+    border-radius: 0 24px 24px 0 !important;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(24px + env(safe-area-inset-bottom, 0px)) 16px !important;
+
+    /* Rich, Solid iOS Frosted Glass to prevent homepage bleed-through */
+    background: linear-gradient(
+      165deg,
+      rgba(255, 255, 255, 0.96) 0%,
+      rgba(248, 250, 252, 0.93) 48%,
+      rgba(241, 245, 249, 0.97) 100%
+    ) !important;
+    backdrop-filter: blur(32px) saturate(190%) contrast(102%) !important;
+    -webkit-backdrop-filter: blur(32px) saturate(190%) contrast(102%) !important;
+
+    border: none !important;
+    border-right: 1.5px solid rgba(255, 255, 255, 0.95) !important;
+    box-shadow:
+      0 0 50px rgba(15, 23, 42, 0.28),
+      12px 0 35px rgba(0, 0, 0, 0.10) !important;
+
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    display: flex !important;
+    flex-direction: column !important;
   }
 
-  .welcome-area {
-    padding: 36px 0 100px;
+  .close-menu {
+    width: 36px !important;
+    height: 36px !important;
+    font-size: 22px !important;
+    z-index: 101 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    cursor: pointer !important;
   }
 
-  .welcome-area h1 {
-    font-size: 26px;
+  .sidebar-bottom {
+    margin-top: auto !important;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)) !important;
+    flex-shrink: 0 !important;
   }
 
-  .welcome-description {
-    font-size: 13px;
-    padding: 0 8px;
+  /* 5. HOMEPAGE MOBILE ALIGNMENT & OVERFLOW PREVENTION */
+  .chatgpt-layout {
+    height: calc(100dvh - 64px - env(safe-area-inset-top, 0px)) !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
   }
 
-  /* Chat bottom bar input on mobile */
-  .chat-input-bar {
-    padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px)) 12px;
+  .chatgpt-scroll-area {
+    padding: 18px 14px 130px !important;
+    overflow-x: hidden !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
   }
 
-  .chat-input-box {
-    padding: 8px 12px;
+  .chatgpt-center-hero {
+    margin: 16px auto auto auto !important;
+    padding: 12px 8px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+  }
+
+  .chatgpt-center-hero::before {
+    width: 90vw !important;
+    height: 220px !important;
+    top: 10px !important;
+  }
+
+  .chatgpt-logo-circle {
+    width: 58px !important;
+    height: 58px !important;
+    font-size: 28px !important;
+    margin-bottom: 14px !important;
+  }
+
+  .chatgpt-hero-title {
+    font-size: 21px !important;
+    line-height: 1.32 !important;
+    margin: 0 0 8px 0 !important;
+    padding: 0 6px !important;
+    word-break: break-word !important;
+  }
+
+  .chatgpt-hero-subtitle {
+    font-size: 13px !important;
+    line-height: 1.45 !important;
+    margin: 0 0 20px 0 !important;
+    padding: 0 8px !important;
+    word-break: break-word !important;
+  }
+
+  .chatgpt-suggestions-wrap {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 4px !important;
+    box-sizing: border-box !important;
+  }
+
+  .chatgpt-chip {
+    padding: 7px 13px !important;
+    font-size: 12px !important;
+    line-height: 1.3 !important;
+    border-radius: 999px !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    white-space: normal !important;
+    text-align: left !important;
+    word-break: break-word !important;
+  }
+
+  .chatgpt-bottom-bar {
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom, 0px)) 12px !important;
+  }
+
+  .chatgpt-input-box {
+    padding: 7px 10px 7px 14px !important;
+    border-radius: 24px !important;
+    gap: 6px !important;
   }
 
   /* Auth screen responsive sizing */
   .auth-container {
-    padding: 16px 12px;
+    padding: 16px 12px !important;
   }
 
   .auth-glass-card {
-    padding: 26px 20px;
+    padding: 26px 20px !important;
     border-radius: 22px !important;
   }
 }
 
-/* COMPACT SMARTPHONES (<= 480px) */
+/* COMPACT SMARTPHONES (<= 480px, e.g. 390px, 430px) */
 @media (max-width: 480px) {
   .topbar {
-    padding: 0 8px;
-    gap: 4px;
+    padding: 0 10px !important;
+    gap: 6px !important;
+  }
+
+  .menu-button {
+    width: 36px !important;
+    height: 36px !important;
+    font-size: 19px !important;
+  }
+
+  .mobile-brand {
+    gap: 5px !important;
+    margin-left: 2px !important;
+  }
+
+  .mobile-brand span {
+    font-size: 18px !important;
   }
 
   .mobile-brand strong {
-    font-size: 14.5px;
+    font-size: 14.5px !important;
   }
 
-  /* Hide textual user name in topbar on small screens to prevent clipping */
-  .profile-name {
-    display: none;
-  }
-
-  .profile-button {
-    padding: 4px 6px;
-    gap: 4px;
-  }
-
-  .topbar-backend-badge {
-    padding: 4px 8px;
-    font-size: 10.5px;
+  .topbar-right {
+    gap: 6px !important;
   }
 
   .topbar-lang-toggle {
-    padding: 3px 6px;
+    margin-top: 4px !important; /* Move slightly downward */
+    padding: 2.5px 5px !important;
+    gap: 1.5px !important;
   }
 
   .topbar-lang-btn {
-    font-size: 11px;
-    padding: 2px 4px;
+    font-size: 10.5px !important;
+    padding: 2.5px 5px !important;
+  }
+
+  .topbar-lang-sep {
+    font-size: 9px !important;
+    margin: 0 0.5px !important;
+  }
+
+  .user-profile-menu-container {
+    margin-top: 4px !important; /* Move slightly downward */
+    margin-right: -2px !important; /* Move slightly to the right */
+  }
+
+  .profile-button {
+    padding: 3px 6px 3px 3px !important;
+    gap: 4px !important;
+  }
+
+  .profile-avatar {
+    width: 25px !important;
+    height: 25px !important;
+    font-size: 11px !important;
+  }
+
+  .profile-name {
+    display: inline-block !important; /* Keep profile name visible */
+    font-size: 11px !important;
+    max-width: 48px !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
   }
 
   .profile-dropdown-glass {
-    right: -8px;
-    width: calc(100vw - 24px);
-    max-width: 280px;
+    right: 0 !important;
+    width: min(260px, calc(100vw - 20px)) !important;
+    max-width: calc(100vw - 20px) !important;
   }
 
-  /* Quick actions wrapping */
-  .quick-actions {
-    gap: 6px;
+  .chatgpt-center-hero {
+    margin-top: 10px !important;
+    padding: 8px 4px !important;
   }
 
-  .quick-actions button {
-    font-size: 11.5px;
-    padding: 0 10px;
-    min-height: 36px;
+  .chatgpt-hero-title {
+    font-size: 19px !important;
+    margin-bottom: 6px !important;
+  }
+
+  .chatgpt-hero-subtitle {
+    font-size: 12.5px !important;
+    margin-bottom: 16px !important;
+  }
+
+  .chatgpt-chip {
+    padding: 6px 11px !important;
+    font-size: 11.5px !important;
+  }
+}
+
+/* EXTRA-COMPACT PHONES (<= 360px) */
+@media (max-width: 360px) {
+  .topbar {
+    padding: 0 6px !important;
+    gap: 4px !important;
+  }
+
+  .mobile-brand strong {
+    font-size: 13.5px !important;
+  }
+
+  .topbar-right {
+    gap: 4px !important;
+  }
+
+  .topbar-lang-toggle {
+    margin-top: 4px !important;
+    padding: 2px 4px !important;
+  }
+
+  .topbar-lang-btn {
+    font-size: 10px !important;
+    padding: 2px 4px !important;
+  }
+
+  .user-profile-menu-container {
+    margin-top: 4px !important;
+    margin-right: -3px !important;
+  }
+
+  .profile-name {
+    max-width: 38px !important;
+    font-size: 10.5px !important;
   }
 }
