@@ -2087,12 +2087,18 @@ function MedicalAnswerRenderer({
               <div style={{ marginTop: "8px", borderTop: "1px solid rgba(0,0,0,0.06)", paddingTop: "8px" }}>
                 <strong style={{ fontSize: "11px", color: "#334155" }}>Verified Database Sources & Citations:</strong>
                 <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "4px" }}>
-                  {sources.map((s, idx) => (
-                    <div key={idx} style={{ fontSize: "11px", background: "rgba(255,255,255,0.7)", padding: "6px 8px", borderRadius: "8px", border: "1px solid rgba(0,0,0,0.06)" }}>
-                      <div style={{ fontWeight: 600, color: "#1e293b" }}>[{s.documentId}] {s.title}</div>
-                      <div style={{ color: "#64748b", fontSize: "10.5px" }}>{s.sourceName} • {s.subject} ({s.topic})</div>
-                    </div>
-                  ))}
+                  {sources.map((s: any, idx) => {
+                    const isObj = typeof s === "object" && s !== null;
+                    const docId = isObj ? s.documentId || idx + 1 : idx + 1;
+                    const titleText = isObj ? s.title || s.sourceName || "Clinical Knowledge Record" : s;
+                    const metaText = isObj ? `${s.sourceName || "NIH MedQuAD"} • ${s.subject || "Medicine"} (${s.topic || "Clinical"})` : "Verified Database Source";
+                    return (
+                      <div key={idx} style={{ fontSize: "11px", background: "rgba(255,255,255,0.7)", padding: "6px 8px", borderRadius: "8px", border: "1px solid rgba(0,0,0,0.06)" }}>
+                        <div style={{ fontWeight: 600, color: "#1e293b" }}>[{docId}] {titleText}</div>
+                        <div style={{ color: "#64748b", fontSize: "10.5px" }}>{metaText}</div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}

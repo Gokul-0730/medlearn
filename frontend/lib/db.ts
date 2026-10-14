@@ -94,12 +94,12 @@ export interface ClinicalSearchResult {
   question: string;
   language: string;
   intent: MedicalIntent;
-  confidence: number;
+  confidence: string | number;
   retrievalScore: number;
   retrievalMethod: string;
   relatedTopics: string[];
   ragSources: string[];
-  sources: string[];
+  sources: Array<string | { documentId?: string | number; title?: string; subject?: string; topic?: string; sourceName?: string; relevanceScore?: number }>;
   grounded: boolean;
   retrievedChunksCount: number;
   answer: string;
@@ -167,6 +167,11 @@ const MEDICAL_SYNONYMS: Record<string, string[]> = {
   platelets: ["thrombocytes", "thrombocyte"],
   thrombocytes: ["platelets"],
   hemoglobin: ["hgb", "hb", "hemoglobin level"],
+  migraine: ["headache", "vascular headache", "cephalalgia"],
+  headache: ["migraine", "cephalalgia", "tension headache"],
+  stroke: ["cerebrovascular accident", "cva", "brain attack"],
+  pneumonia: ["lung infection", "pulmonitis"],
+  "kidney disease": ["renal disease", "renal failure", "ckd"],
 };
 
 // Conversational Prefixes sorted by length descending
@@ -408,11 +413,16 @@ function cleanEntity(str: string): string {
   return s;
 }
 
+const INQUIRY_PREFIX_REGEX = /^(what\s+is\s+(\(?are\)?\s+)?|what\s+are\s+|what\s+causes\s+|what\s+is\s+the\s+cause\s+of\s+|what\s+is\s+the\s+treatment\s+for\s+|what\s+are\s+the\s+treatments\s+for\s+|what\s+are\s+the\s+symptoms\s+of\s+|what\s+are\s+the\s+signs\s+of\s+|what\s+is\s+the\s+function\s+of\s+|what\s+are\s+the\s+functions\s+of\s+|what\s+is\s+the\s+role\s+of\s+|what\s+is\s+the\s+purpose\s+of\s+|tell\s+me\s+about\s+|give\s+me\s+(information|details)\s+(on|about)\s+|clinical\s+overview\s+of\s+|give\s+me\s+a\s+clinical\s+overview\s+of\s+|explain\s+(how|the\s+treatment\s+of|the\s+mechanism\s+of|the\s+procedure\s+for|the\s+structure\s+and\s+function\s+of|the\s+function\s+of)?\s*|treatment\s+(for|of)\s+|treatments\s+(for|of)\s+|how\s+to\s+treat\s+|how\s+do\s+you\s+treat\s+|cure\s+for\s+|management\s+of\s+|therapy\s+for\s+|symptoms\s+of\s+|signs\s+of\s+|causes\s+of\s+|cause\s+of\s+|diagnosis\s+of\s+|how\s+to\s+diagnose\s+|prevention\s+of\s+|how\s+to\s+prevent\s+|how\s+can\s+i\s+prevent\s+|risk\s+factors\s+for\s+|complications\s+of\s+|pathophysiology\s+of\s+|mechanism\s+of\s+|overview\s+of\s+|definition\s+of\s+|meaning\s+of\s+|define\s+|describe\s+)/i;
+
 function extractEntity(q: string): string {
   // Strip trailing punctuation first
   let cleaned = (q || "").replace(/[?!.]+$/, "").trim();
 
-  // Strip longest prefix match
+  // Strip prefixes using high-precision regex
+  cleaned = cleaned.replace(INQUIRY_PREFIX_REGEX, "").trim();
+
+  // Also check longest prefix match array as secondary pass
   for (const prefix of CONVERSATIONAL_PREFIXES) {
     const regex = new RegExp(`^${prefix}\\s+`, "i");
     if (regex.test(cleaned)) {
@@ -425,7 +435,7 @@ function extractEntity(q: string): string {
   cleaned = cleaned
     .replace(/\s+(and their function|and its function|and their role|and its role|structure and function|function and structure)$/i, "")
     .replace(/\s+(diagnosed|for a viva|for viva|viva question|in mcq format|case study)$/i, "")
-    .replace(/\s+(works|work|functioning)$/i, "")
+    .replace(/\s+(works|work|functioning|functions)$/i, "")
     .replace(/[?!.]+$/, "")
     .trim();
 
@@ -764,12 +774,33 @@ async function searchViaSupabaseRest(
   analysis: QueryAnalysis
 ): Promise<ClinicalSearchResult> {
   const entity = analysis.entityA || query;
-  const searchTerms = [entity, ...(analysis.expandedTerms || [])].filter(Boolean);
+  const terms = new Set<string>();
+  if (entity) terms.add(entity);
+  (analysis.expandedTerms || []).forEach((t) => terms.add(t));
+
+  // Only if no entity was identified, extract fallback non-intent keywords
+  if (terms.size === 0) {
+    const genericWords = new Set([
+      "what", "is", "are", "the", "a", "an", "of", "for", "in", "to", "and", "or",
+      "with", "about", "can", "how", "does", "do", "why", "tell", "me", "give", "you",
+      "treatment", "treat", "treatments", "symptom", "symptoms", "sign", "signs",
+      "cause", "causes", "diagnosis", "diagnose", "prevention", "prevent", "cure",
+      "management", "overview", "mechanism", "pathophysiology"
+    ]);
+    query
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !genericWords.has(w))
+      .forEach((w) => terms.add(w));
+  }
+
+  const searchTerms = Array.from(terms).filter(Boolean);
 
   try {
     const supabase = getSupabaseClient();
     const primaryFilters: string[] = [];
-    searchTerms.slice(0, 5).forEach((t) => {
+    searchTerms.slice(0, 6).forEach((t) => {
       const cleanT = t.replace(/[%_,]/g, " ").trim();
       if (cleanT.length >= 3) {
         primaryFilters.push(`question.ilike.%${cleanT}%`);
@@ -783,7 +814,7 @@ async function searchViaSupabaseRest(
         .from("medical_knowledge")
         .select("id, subject, topic, question, answer, source")
         .or(primaryFilters.join(","))
-        .limit(10);
+        .limit(15);
       data = resp.data;
     }
 
@@ -813,7 +844,15 @@ async function searchViaSupabaseRest(
       return getOfflineClinicalKnowledge(query, language, analysis);
     }
 
-    const candidates: ClinicalMatch[] = data.map((r: any) => ({
+    // Deduplicate records by ID
+    const uniqueMap = new Map<number, any>();
+    data.forEach((r) => {
+      if (!uniqueMap.has(Number(r.id))) {
+        uniqueMap.set(Number(r.id), r);
+      }
+    });
+
+    const candidates: ClinicalMatch[] = Array.from(uniqueMap.values()).map((r: any) => ({
       id: Number(r.id),
       subject: r.subject || "General Health",
       topic: r.topic || "Clinical Medicine",
@@ -824,10 +863,36 @@ async function searchViaSupabaseRest(
       rrfScore: 0.08,
     }));
 
+    // Score and rank candidates by topic, question, and intent aspect match
+    const entityLower = entity.toLowerCase();
+    const scoredCandidates = candidates.map((c) => {
+      let score = 0.05;
+      const qLower = c.question.toLowerCase();
+      const tLower = c.topic.toLowerCase();
+
+      if (tLower === entityLower) score += 0.08;
+      else if (tLower.includes(entityLower)) score += 0.04;
+
+      if (qLower.includes(entityLower)) score += 0.04;
+
+      if (analysis.intent === "TREATMENT" && /treatment|treat|cure|management|medication/i.test(qLower)) score += 0.06;
+      else if (analysis.intent === "SYMPTOMS" && /symptom|sign|manifestation/i.test(qLower)) score += 0.06;
+      else if (analysis.intent === "DIAGNOSIS" && /diagnos|test|screen/i.test(qLower)) score += 0.06;
+      else if (analysis.intent === "DEFINITION" && /^(what is|what are)/i.test(qLower) && !/treatment|symptom/i.test(qLower)) score += 0.06;
+
+      return {
+        ...c,
+        rrfScore: score,
+        relevanceScore: score,
+      };
+    });
+
+    scoredCandidates.sort((a, b) => (b.rrfScore || 0) - (a.rrfScore || 0));
+
     // Negative disambiguation check
     const isWBCQuery = /\b(white\s*blood|wbc|leukocyte)/i.test(query);
     const isRBCQuery = /\b(red\s*blood|rbc|erythrocyte)/i.test(query);
-    const filteredCandidates = candidates.filter((c) => {
+    const filteredCandidates = scoredCandidates.filter((c) => {
       const qLower = c.question.toLowerCase();
       const aLower = c.answer.toLowerCase();
       if (isWBCQuery && !isRBCQuery && (qLower.includes("red blood") || aLower.startsWith("red blood"))) {
@@ -859,7 +924,28 @@ function formatGroundedAnswerByIntent(
   originalQuery: string,
   language: string
 ): ClinicalSearchResult {
-  const primary = candidates[0];
+  const intent = analysis.intent;
+
+  // Choose primary candidate based on intent matching:
+  let primary = candidates[0];
+  if (intent === "TREATMENT") {
+    const tMatch = candidates.find((c) => /treatment|treat|cure|management|medication|therapy/i.test(c.question));
+    if (tMatch) primary = tMatch;
+  } else if (intent === "SYMPTOMS") {
+    const sMatch = candidates.find((c) => /symptom|sign|manifestation/i.test(c.question));
+    if (sMatch) primary = sMatch;
+  } else if (intent === "DIAGNOSIS") {
+    const dMatch = candidates.find((c) => /diagnos|test|screen|investigation/i.test(c.question));
+    if (dMatch) primary = dMatch;
+  } else if (intent === "DEFINITION" || intent === "CLINICAL_OVERVIEW") {
+    const defMatch = candidates.find(
+      (c) =>
+        /^(what\s+is|what\s+are|tell\s+me\s+about)/i.test(c.question.trim()) &&
+        !/treatment|symptom|cause|prevent|outlook/i.test(c.question)
+    );
+    if (defMatch) primary = defMatch;
+  }
+
   // If primary.topic is generic (e.g. "Blood", "General Health", "General"), prefer the clean entity name
   let topicName = primary.topic;
   if (!topicName || /^(general(\s*health)?|blood|clinical medicine)$/i.test(topicName.trim())) {
@@ -867,17 +953,20 @@ function formatGroundedAnswerByIntent(
       ? analysis.entityA.charAt(0).toUpperCase() + analysis.entityA.slice(1)
       : primary.topic || "Clinical Medicine";
   }
-  const intent = analysis.intent;
 
   let answerMarkdown = "";
-  const sources = [...new Set(candidates.slice(0, 3).map((c) => c.source || "NIH MedQuAD"))];
+  const uniqueSourceNames = [...new Set(candidates.slice(0, 3).map((c) => c.source || "NIH MedQuAD"))];
 
   // Helper to find specific clinical aspects from retrieved candidates
   const symptomDoc = candidates.find((c) => /symptom|sign/i.test(c.question));
   const treatmentDoc = candidates.find((c) => /treatment|treat|management/i.test(c.question) && c.id !== primary.id);
   const causeDoc = candidates.find((c) => /cause|risk factor/i.test(c.question) && c.id !== primary.id);
   const diagDoc = candidates.find((c) => /diagnos|test/i.test(c.question));
-  const defDoc = candidates.find((c) => (c.question.toLowerCase().startsWith("what is") || c.question.toLowerCase().startsWith("what are")) && !/symptom|treatment/i.test(c.question));
+  const defDoc = candidates.find(
+    (c) =>
+      (c.question.toLowerCase().startsWith("what is") || c.question.toLowerCase().startsWith("what are")) &&
+      !/symptom|treatment/i.test(c.question)
+  );
 
   switch (intent) {
     case "DEFINITION":
@@ -998,17 +1087,29 @@ function formatGroundedAnswerByIntent(
     answerMarkdown += `- <u>${c.source || "NIH MedQuAD"}</u>: <i>${c.question}</i> [Record ID: ${c.id}]\n`;
   });
 
+  const structuredSources = candidates.slice(0, 3).map((c) => ({
+    documentId: c.id,
+    title: c.question,
+    subject: c.subject,
+    topic: c.topic,
+    sourceName: c.source || "NIH MedQuAD",
+    relevanceScore: Math.round((c.rrfScore || c.relevanceScore || 0.08) * 1000) / 10,
+  }));
+
+  const calcScore = Math.min(Math.max((primary.rrfScore || 0.05) * 1000, 80), 99);
+  const confidenceLevel = calcScore >= 70 ? "HIGH" : calcScore >= 40 ? "MEDIUM" : "LOW";
+
   return {
     success: true,
     question: originalQuery,
     language,
     intent,
-    confidence: Math.min(Math.max((primary.rrfScore || 0.05) * 1000, 78), 98),
-    retrievalScore: Math.min(Math.max((primary.rrfScore || 0.05) * 1000, 80), 99),
+    confidence: confidenceLevel,
+    retrievalScore: calcScore,
     retrievalMethod: "HYBRID (Reciprocal Rank Fusion: PostgreSQL Trigram + FTS + Exact Phrase)",
     relatedTopics: candidates.slice(0, 4).map((c) => c.topic).filter(Boolean),
-    ragSources: sources,
-    sources,
+    ragSources: uniqueSourceNames,
+    sources: structuredSources,
     grounded: true,
     retrievedChunksCount: candidates.length,
     answer: answerMarkdown,
