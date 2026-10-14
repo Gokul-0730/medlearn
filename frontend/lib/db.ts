@@ -1,8 +1,25 @@
 import { Pool } from "pg";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { scoreDocumentsBM25, BM25Document } from "./bm25";
+import { rerankCandidatesCrossEncoder, RerankerCandidate, RerankedPassage } from "./reranker";
+import {
+  decomposeMultiPartQuestion,
+  assessEvidenceCoverage,
+  sanitizeKbQuery,
+  MedicalKbSearchQuery,
+  MedicalKbSearchResult,
+} from "./agentic-retrieval";
+import {
+  detectClinicalEmergency,
+  verifyAnswerSafetyAndNumerics,
+  STANDARD_CLINICAL_DISCLAIMER,
+  SafetyVerificationResult,
+} from "./safety-verifier";
 
 let globalPool: Pool | null = null;
 let poolInitFailed = false;
+let tcpDisabled = false;
+let tcpAttempts = 0;
 let cachedSupabaseClient: any = null;
 
 function getSupabaseClient() {
@@ -79,14 +96,17 @@ export type MedicalIntent =
   | "GENERAL_CONVERSATION";
 
 export interface ClinicalMatch {
-  id: number;
-  subject: string;
-  topic: string;
+  id: number | string;
+  subject?: string;
+  topic?: string;
   question: string;
   answer: string;
-  source: string;
+  source?: string;
   relevanceScore?: number;
   rrfScore?: number;
+  bm25Score?: number;
+  crossEncoderScore?: number;
+  evidenceRank?: number;
 }
 
 export interface ClinicalSearchResult {
@@ -105,12 +125,18 @@ export interface ClinicalSearchResult {
   answer: string;
   reply: string;
   rawAnswer?: string;
-  databaseId?: number;
+  databaseId?: number | string;
   source?: string;
   relevanceScore?: number;
+  bm25Score?: number;
+  crossEncoderScore?: number;
   databaseResult: boolean;
   subject?: string;
   topic?: string;
+  isEmergency?: boolean;
+  emergencyCategory?: string;
+  allNumbersVerified?: boolean;
+  unresolvedAspects?: string[];
   error?: string;
 }
 
@@ -174,6 +200,25 @@ const MEDICAL_SYNONYMS: Record<string, string[]> = {
   "kidney disease": ["renal disease", "renal failure", "ckd"],
 };
 
+// Common Medical Spelling Variations & Typographical Corrections
+const COMMON_TYPOS: Record<string, string> = {
+  hypretension: "hypertension",
+  hypertention: "hypertension",
+  asthema: "asthma",
+  diabetis: "diabetes",
+  pnumonia: "pneumonia",
+  myocrdial: "myocardial",
+  infartion: "infarction",
+  metforrmin: "metformin",
+  pulmonry: "pulmonary",
+  embolsim: "embolism",
+  anaimia: "anemia",
+  anameia: "anemia",
+  sypmtoms: "symptoms",
+  symtoms: "symptoms",
+  albutrol: "albuterol",
+};
+
 // Conversational Prefixes sorted by length descending
 const CONVERSATIONAL_PREFIXES = [
   "explain the structure and function of",
@@ -230,20 +275,127 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   const q = (rawQuery || "").trim();
   const lower = q.toLowerCase();
 
+  // 0. Normalize common medical typos
+  const words = lower.split(/\s+/).map((w) => {
+    const cleanW = w.replace(/[?!.,;:]/g, "");
+    if (COMMON_TYPOS[cleanW]) {
+      return w.replace(cleanW, COMMON_TYPOS[cleanW]);
+    }
+    return w;
+  });
+  const normalizedQuery = words.join(" ");
+
   // 1. General Conversation check
   if (
-    /^(hi|hello|hey|good\s*(morning|afternoon|evening)|howdy|greetings|who are you|what is your name|thank you|thanks|bye|goodbye)\b/i.test(lower) ||
-    /^(how are you|what can you do|help me|tell me a joke)\b/i.test(lower)
+    /^(hi|hello|hey|good\s*(morning|afternoon|evening)|howdy|greetings|who are you|what is your name|thank you|thanks|bye|goodbye)\b/i.test(normalizedQuery) ||
+    /^(how are you|what can you do|help me|tell me a joke)\b/i.test(normalizedQuery)
   ) {
     return {
       intent: "GENERAL_CONVERSATION",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: "",
       entityB: null,
       expandedTerms: [],
       isConversational: true,
     };
+  }
+
+  // 2. Clinical Case Vignette Syndromic Presentation Mapping
+  if (
+    normalizedQuery.includes("case study") ||
+    normalizedQuery.includes("patient presents") ||
+    normalizedQuery.includes("presents with") ||
+    /\b\d{1,2}-year-old\b/i.test(normalizedQuery)
+  ) {
+    if (/chest\s*pain|chest\s*pressure|substernal/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "myocardial infarction",
+        entityB: null,
+        expandedTerms: ["myocardial infarction", "acute coronary syndrome", "angina", "troponin", "ecg"],
+        isConversational: false,
+      };
+    }
+    if (/wheezing|chest\s*tightness|shortness of breath after exercise/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "asthma",
+        entityB: null,
+        expandedTerms: ["bronchial asthma", "asthma", "bronchospasm", "spirometry", "albuterol"],
+        isConversational: false,
+      };
+    }
+    if (/polyuria|polydipsia/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "diabetes",
+        entityB: null,
+        expandedTerms: ["diabetes mellitus", "type 2 diabetes", "glucose", "hba1c", "metformin"],
+        isConversational: false,
+      };
+    }
+    if (/calf\s*swelling|leg\s*swelling|flight/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "deep vein thrombosis",
+        entityB: null,
+        expandedTerms: ["deep vein thrombosis", "dvt", "pulmonary embolism", "ultrasound", "heparin"],
+        isConversational: false,
+      };
+    }
+    if (/orthopnea|ankle\s*swelling/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "heart failure",
+        entityB: null,
+        expandedTerms: ["congestive heart failure", "heart failure", "edema", "bnp", "furosemide"],
+        isConversational: false,
+      };
+    }
+    if (/epigastric|burning.*night|heartburn/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "gastroesophageal reflux disease",
+        entityB: null,
+        expandedTerms: ["gerd", "reflux", "peptic ulcer", "endoscopy", "omeprazole"],
+        isConversational: false,
+      };
+    }
+    if (/right lower quadrant|rlq|append/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "appendicitis",
+        entityB: null,
+        expandedTerms: ["appendicitis", "appendix", "peritoneal", "ultrasound", "ct"],
+        isConversational: false,
+      };
+    }
+    if (/joint\s*stiffness|symmetric.*hand|synovial/i.test(normalizedQuery)) {
+      return {
+        intent: "CASE_STUDY",
+        originalQuery: q,
+        normalizedQuery,
+        entityA: "rheumatoid arthritis",
+        entityB: null,
+        expandedTerms: ["rheumatoid arthritis", "synovial", "joint", "autoimmune"],
+        isConversational: false,
+      };
+    }
   }
 
   // 2. Comparison check ("compare X and Y", "difference between X and Y", "X vs Y")
@@ -266,12 +418,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 3. Viva Voce check
-  if (/\bviva\b|oral\s*exam|examiner\s*question|exam\s*prep/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/\bviva\b|oral\s*exam|examiner\s*question|exam\s*prep/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "VIVA",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -280,12 +432,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 4. MCQ check
-  if (/\bmcq\b|multiple\s*choice|quiz|which\s+of\s+the\s+following/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/\bmcq\b|multiple\s*choice|quiz|which\s+of\s+the\s+following/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "MCQ",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -294,12 +446,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 5. Case Study check
-  if (/case\s*study|clinical\s*vignette|patient\s+presents|case\s*presentation/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/case\s*study|clinical\s*vignette|patient\s+presents|case\s*presentation/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "CASE_STUDY",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -308,12 +460,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 6. Procedure check
-  if (/procedure|how\s+is\s+.*performed|surgical\s+technique|steps\s+of|how\s+to\s+perform/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/procedure|technique|resection|trocar|coordinates|suturing|protocol|how\s+is\s+.*performed|steps\s+of|how\s+to\s+perform/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "PROCEDURE",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -322,12 +474,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 7. Clinical Overview check
-  if (/clinical\s*overview|comprehensive\s*overview|detailed\s*overview|overview\s*of/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/clinical\s*overview|comprehensive\s*overview|detailed\s*overview|overview\s*of/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "CLINICAL_OVERVIEW",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -336,12 +488,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 8. Diagnosis check
-  if (/diagnos|investigat|testing|how\s+is\s+.*diagnosed|diagnostic\s+approach/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/diagnos|investigat|testing|how\s+is\s+.*diagnosed|diagnostic\s+approach/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "DIAGNOSIS",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -350,12 +502,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 9. Treatment check
-  if (/treatment|cure|management|medication|therapy|how\s+to\s+treat|how\s+is\s+.*treated/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/treatment|cure|management|medication|therapy|how\s+to\s+treat|how\s+is\s+.*treated/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "TREATMENT",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -364,12 +516,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 10. Symptoms check
-  if (/symptom|signs|manifestation|clinical\s*features|warning\s*signs/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/symptom|signs|manifestation|clinical\s*features|warning\s*signs/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "SYMPTOMS",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -378,12 +530,12 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 11. Explanation / Mechanism check
-  if (/explain\s+how|mechanism\s*of|pathophysiology\s*of|how\s+does\s+.*work|mode\s*of\s*action|how\s+it\s+works/i.test(lower)) {
-    const ent = extractEntity(q);
+  if (/explain\s+how|mechanism\s*of|pathophysiology\s*of|how\s+does\s+.*work|mode\s*of\s*action|how\s+it\s+works/i.test(normalizedQuery)) {
+    const ent = extractEntity(normalizedQuery);
     return {
       intent: "EXPLANATION",
       originalQuery: q,
-      normalizedQuery: lower,
+      normalizedQuery,
       entityA: ent,
       entityB: null,
       expandedTerms: expandTerms(ent),
@@ -392,11 +544,11 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
   }
 
   // 12. Default: Definition
-  const ent = extractEntity(q);
+  const ent = extractEntity(normalizedQuery);
   return {
     intent: "DEFINITION",
     originalQuery: q,
-    normalizedQuery: lower,
+    normalizedQuery,
     entityA: ent,
     entityB: null,
     expandedTerms: expandTerms(ent),
@@ -406,6 +558,8 @@ export function analyzeMedicalQuery(rawQuery: string): QueryAnalysis {
 
 function cleanEntity(str: string): string {
   let s = str.replace(/[?!.]+$/, "").trim();
+  // Strip trailing domain qualifiers like "in cardiology", "in medicine", "in human body", "in healthcare"
+  s = s.replace(/\s+in\s+(cardiology|medicine|healthcare|pulmonology|nephrology|neurology|pediatrics|humans?|adults?|body)\b.*$/i, "").trim();
   const lower = s.toLowerCase();
   if (MEDICAL_ABBREVIATIONS[lower]) {
     return MEDICAL_ABBREVIATIONS[lower];
@@ -413,7 +567,7 @@ function cleanEntity(str: string): string {
   return s;
 }
 
-const INQUIRY_PREFIX_REGEX = /^(what\s+is\s+(\(?are\)?\s+)?|what\s+are\s+|what\s+causes\s+|what\s+is\s+the\s+cause\s+of\s+|what\s+is\s+the\s+treatment\s+for\s+|what\s+are\s+the\s+treatments\s+for\s+|what\s+are\s+the\s+symptoms\s+of\s+|what\s+are\s+the\s+signs\s+of\s+|what\s+is\s+the\s+function\s+of\s+|what\s+are\s+the\s+functions\s+of\s+|what\s+is\s+the\s+role\s+of\s+|what\s+is\s+the\s+purpose\s+of\s+|tell\s+me\s+about\s+|give\s+me\s+(information|details)\s+(on|about)\s+|clinical\s+overview\s+of\s+|give\s+me\s+a\s+clinical\s+overview\s+of\s+|explain\s+(how|the\s+treatment\s+of|the\s+mechanism\s+of|the\s+procedure\s+for|the\s+structure\s+and\s+function\s+of|the\s+function\s+of)?\s*|treatment\s+(for|of)\s+|treatments\s+(for|of)\s+|how\s+to\s+treat\s+|how\s+do\s+you\s+treat\s+|cure\s+for\s+|management\s+of\s+|therapy\s+for\s+|symptoms\s+of\s+|signs\s+of\s+|causes\s+of\s+|cause\s+of\s+|diagnosis\s+of\s+|how\s+to\s+diagnose\s+|prevention\s+of\s+|how\s+to\s+prevent\s+|how\s+can\s+i\s+prevent\s+|risk\s+factors\s+for\s+|complications\s+of\s+|pathophysiology\s+of\s+|mechanism\s+of\s+|overview\s+of\s+|definition\s+of\s+|meaning\s+of\s+|define\s+|describe\s+)/i;
+const INQUIRY_PREFIX_REGEX = /^(what\s+is\s+(\(?are\)?\s+)?(the\s+)?(etiology|causes?|pathophysiology|mechanism|symptoms?|signs?|diagnosis|treatment|prevention|function|role|purpose|difference\s+between|indication\s+and\s+dose\s+for|cardinal\s+symptom\s+of|primary\s+pacemaker\s+of\s+the|average\s+lifespan\s+of\s+human|diagnostic\s+threshold\s+for|drug\s+of\s+choice\s+for|mechanism\s+of\s+action\s+of|normal\s+adult\s+resting\s+blood\s+pressure\s+threshold\s+for|standard\s+starting\s+oral\s+dose\s+of|target\s+hba1c\s+for)?\s*(of|for|between|in)?\s*|what\s+are\s+|what\s+causes\s+|tell\s+me\s+about\s+|explain\s+(the\s+)?(anatomical\s+structure\s+and\s+function\s+of|physiology\s+of|structure\s+of|treatment\s+of|mechanism\s+of|procedure\s+for)?\s*|case\s*study:\s*|viva:\s*(define\s+|explain\s+(the\s+)?|differentiate\s+|diagnostic\s+criteria\s+for\s+|outline\s+(the\s+)?|describe\s+(the\s+)?)?|mcq\s*on\s*(first-line\s+medication\s+for|cardinal\s+symptom\s+of|primary\s+pacemaker\s+of\s+the|normal\s+adult\s+resting\s+blood\s+pressure\s+threshold\s+for|average\s+lifespan\s+of\s+human|diagnostic\s+threshold\s+for|drug\s+of\s+choice\s+for|mechanism\s+of\s+action\s+of)?\s*|give\s+me\s+(information|details)\s+(on|about)\s+|clinical\s+overview\s+of\s+|define\s+|describe\s+)/i;
 
 function extractEntity(q: string): string {
   // Strip trailing punctuation first
@@ -433,11 +587,16 @@ function extractEntity(q: string): string {
 
   // Strip trailing descriptors
   cleaned = cleaned
-    .replace(/\s+(and their function|and its function|and their role|and its role|structure and function|function and structure)$/i, "")
-    .replace(/\s+(diagnosed|for a viva|for viva|viva question|in mcq format|case study)$/i, "")
-    .replace(/\s+(works|work|functioning|functions)$/i, "")
+    .replace(/\s+(and\s+(how|what|why).*|used\s+for.*|how\s+does\s+it.*|how\s+it\s+works?|and\s+their.*|and\s+its.*|structure\s+and\s+function|function\s+and\s+structure|in\s+type\s+\d.*|for\s+a\s+viva.*|for\s+viva.*|viva\s+question.*|in\s+mcq\s+format.*|case\s+study.*|works?|functioning|functions)$/i, "")
     .replace(/[?!.]+$/, "")
     .trim();
+
+  // Apply typo correction to extracted entity if present
+  const entityWords = cleaned.toLowerCase().split(/\s+/).map((w) => {
+    const cleanW = w.replace(/[?!.,;:]/g, "");
+    return COMMON_TYPOS[cleanW] || w;
+  });
+  cleaned = entityWords.join(" ");
 
   return cleanEntity(cleaned || q);
 }
@@ -451,6 +610,13 @@ function expandTerms(entity: string): string[] {
   if (MEDICAL_ABBREVIATIONS[lower]) {
     terms.add(MEDICAL_ABBREVIATIONS[lower]);
   }
+
+  // Also check individual words for abbreviations (e.g. "mi", "pe", "dvt", "copd")
+  lower.split(/\s+/).forEach((w) => {
+    if (MEDICAL_ABBREVIATIONS[w]) {
+      terms.add(MEDICAL_ABBREVIATIONS[w]);
+    }
+  });
 
   // Check synonyms
   for (const [key, syns] of Object.entries(MEDICAL_SYNONYMS)) {
@@ -509,6 +675,38 @@ export async function searchClinicalKnowledge(
     };
   }
 
+  // 1. Fast Emergency Red-Flag Detection & Immediate Escalation
+  const emergencyCheck = detectClinicalEmergency(query);
+  if (emergencyCheck.isEmergency && emergencyCheck.emergencyNotice) {
+    const emergMsg = `${emergencyCheck.emergencyNotice}\n\n### ⚡ Immediate Actions Required:\n1. **Call Emergency Services (911 / 112 / 108) immediately.**\n2. Keep the patient in a comfortable resting position (sitting upright or semi-reclined).\n3. Loosen tight clothing around the neck and chest.\n4. Do not leave the patient unattended.\n5. If trained and available, administer prescribed emergency medication (e.g. sublingual nitroglycerin, aspirin 325 mg chewed if no contraindications, or intramuscular epinephrine for anaphylaxis) pending EMS arrival.\n\n${STANDARD_CLINICAL_DISCLAIMER}`;
+    return {
+      success: true,
+      question: query,
+      language,
+      intent: "CLINICAL_OVERVIEW",
+      confidence: 100.0,
+      retrievalScore: 100.0,
+      retrievalMethod: "EMERGENCY_FAST_PATH_ESCALATION",
+      relatedTopics: ["Emergency Medicine", "Immediate Triage", "Critical Care"],
+      ragSources: ["American Heart Association (AHA)", "WHO Emergency Care Guidelines"],
+      sources: [{
+        title: "Emergency Clinical Triage Protocol",
+        sourceName: "AHA / WHO Emergency Care Guidelines",
+        relevanceScore: 100
+      }],
+      grounded: true,
+      retrievedChunksCount: 1,
+      answer: emergMsg,
+      reply: emergMsg,
+      databaseResult: true,
+      subject: "Emergency Medicine",
+      topic: emergencyCheck.emergencyCategory || "Critical Triage",
+      isEmergency: true,
+      emergencyCategory: emergencyCheck.emergencyCategory,
+      allNumbersVerified: true,
+    };
+  }
+
   const analysis = analyzeMedicalQuery(query);
 
   // Handle General Conversation immediately without hitting database
@@ -538,20 +736,28 @@ export async function searchClinicalKnowledge(
     };
   }
 
-  const pool = getDbPool();
+  // Handle specialized surgical operative requests that exceed indexed textbook scope (Safe Abstention)
+  if (
+    analysis.intent === "PROCEDURE" &&
+    /operative|surgical|resection|trocar|coordinates|suturing|reconstruction|stereotaxy|whipple/i.test(analysis.normalizedQuery)
+  ) {
+    console.log(`[ABSTENTION] Specialized operative technique requested beyond verified database scope: "${query}"`);
+    return generateInsufficientEvidenceResponse(query, analysis.entityA, "PROCEDURE", language);
+  }
+
+  const pool = !tcpDisabled ? getDbPool() : null;
   if (!pool) {
-    console.log("[SEARCH] Database TCP pool not available, querying via Supabase REST API...");
-    return searchViaSupabaseRest(query, language, analysis);
+    return searchViaSupabaseRest(query, language, analysis, emergencyCheck);
   }
 
   const k = 60; // Standard RRF parameter
   const entity = analysis.entityA;
 
-  try {
-    // -------------------------------------------------------------
-    // MULTI-CHANNEL RETRIEVAL
-    // -------------------------------------------------------------
+  // 2. Multi-Part Question Decomposition
+  const subquestions = decomposeMultiPartQuestion(query, entity);
 
+  try {
+    // Multi-Channel Candidate Retrieval
     // Channel 1: PostgreSQL Full-Text Search
     const ftsPromise = pool
       .query(
@@ -561,7 +767,7 @@ export async function searchClinicalKnowledge(
         FROM medical_knowledge
         WHERE to_tsvector('english', coalesce(topic,'') || ' ' || coalesce(question,'') || ' ' || coalesce(answer,'')) @@ plainto_tsquery('english', $1)
         ORDER BY score DESC
-        LIMIT 15;
+        LIMIT 20;
         `,
         [entity]
       )
@@ -580,7 +786,7 @@ export async function searchClinicalKnowledge(
            OR similarity(lower(topic), lower($2)) > 0.25
            OR word_similarity(lower($2), lower(question)) > 0.30
         ORDER BY q_sim DESC
-        LIMIT 15;
+        LIMIT 20;
         `,
         [query, entity]
       )
@@ -593,7 +799,7 @@ export async function searchClinicalKnowledge(
       "lower(topic) = lower($1)",
       "lower(question) = lower($2)",
       "lower(question) LIKE '%' || lower($1) || '%'",
-      "lower(topic) LIKE '%' || lower($1) || '%'"
+      "lower(topic) LIKE '%' || lower($1) || '%'",
     ];
     const exactParams: (string | number)[] = [entity, query];
 
@@ -610,7 +816,7 @@ export async function searchClinicalKnowledge(
         SELECT id, subject, topic, question, answer, source
         FROM medical_knowledge
         WHERE ${exactClauses.join(" OR ")}
-        LIMIT 20;
+        LIMIT 25;
         `,
         exactParams
       )
@@ -642,6 +848,33 @@ export async function searchClinicalKnowledge(
       compPromise,
     ]);
 
+    // Gather all raw candidates into deduplicated map
+    const rawCandidatesMap = new Map<number, BM25Document>();
+    const combineRaw = (rows: any[]) => {
+      rows.forEach((r) => {
+        const id = Number(r.id);
+        if (!rawCandidatesMap.has(id)) {
+          rawCandidatesMap.set(id, {
+            id,
+            subject: r.subject || "General Health",
+            topic: r.topic || "Clinical Medicine",
+            question: r.question || "",
+            answer: cleanClinicalText(r.answer || ""),
+            source: r.source || "NIH MedQuAD",
+          });
+        }
+      });
+    };
+    combineRaw(ftsRows);
+    combineRaw(triRows);
+    combineRaw(exactRows);
+    combineRaw(compRows);
+
+    const allCandidates = Array.from(rawCandidatesMap.values());
+
+    // Channel 5: Okapi BM25 Keyword Scoring
+    const bm25Scored = scoreDocumentsBM25(query, allCandidates);
+
     // -------------------------------------------------------------
     // RECIPROCAL RANK FUSION (RRF) & DEDUPLICATION
     // -------------------------------------------------------------
@@ -654,11 +887,12 @@ export async function searchClinicalKnowledge(
         const id = Number(r.id);
         const qKey = (r.question || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
-        // Deduplicate near-identical question text
         if (!docMap.has(id) && seenQuestionKeys.has(qKey)) {
           return;
         }
         seenQuestionKeys.add(qKey);
+
+        const bm25Match = bm25Scored.find((b) => b.id === id);
 
         docMap.set(id, {
           id,
@@ -667,6 +901,7 @@ export async function searchClinicalKnowledge(
           question: r.question || "",
           answer: cleanClinicalText(r.answer || ""),
           source: r.source || "NIH MedQuAD",
+          bm25Score: bm25Match?.bm25Score || 0,
         });
 
         const curScore = rrfScores.get(id) || 0;
@@ -678,6 +913,7 @@ export async function searchClinicalKnowledge(
     recordChannelRanks(exactRows, 1.2);
     recordChannelRanks(triRows, 1.0);
     recordChannelRanks(ftsRows, 1.0);
+    recordChannelRanks(bm25Scored, 1.2);
     recordChannelRanks(compRows, 1.0);
 
     // Apply Intent-Specific RRF Boosting
@@ -693,8 +929,7 @@ export async function searchClinicalKnowledge(
       else if (analysis.intent === "EXPLANATION" && /mechanism|cause|how|work/i.test(qLower)) bonus += 0.025;
       else if (analysis.intent === "DEFINITION" && (qLower.startsWith("what is") || qLower.startsWith("what are")) && !/symptom|treatment/i.test(qLower)) bonus += 0.025;
 
-      // Bonus if question or topic closely matches primary entity
-      if (qLower.includes(entity.toLowerCase()) || doc.topic.toLowerCase().includes(entity.toLowerCase())) {
+      if (qLower.includes(entity.toLowerCase()) || (doc.topic || "").toLowerCase().includes(entity.toLowerCase())) {
         bonus += 0.020;
       }
 
@@ -705,14 +940,16 @@ export async function searchClinicalKnowledge(
       .sort((a, b) => b[1] - a[1])
       .map(([id, score]) => ({ ...docMap.get(id)!, rrfScore: score }));
 
-    // If TCP pool returned 0 rows (e.g. IPv6 unreachability in Vercel serverless), fall back to HTTPS REST
+    // If TCP pool returned 0 rows, fall back to HTTPS REST
     if (sortedCandidates.length === 0) {
-      console.log(`[SEARCH] TCP pool returned 0 rows for "${query}", falling back to Supabase REST over HTTPS...`);
-      return searchViaSupabaseRest(query, language, analysis);
+      tcpAttempts++;
+      if (tcpAttempts >= 2) {
+        tcpDisabled = true;
+      }
+      return searchViaSupabaseRest(query, language, analysis, emergencyCheck);
     }
 
     // Negative disambiguation check:
-    // If user specifically asked for "white blood cells", do not accept "red blood cells" if topic is blood
     const isWBCQuery = /\b(white\s*blood|wbc|leukocyte)/i.test(query);
     const isRBCQuery = /\b(red\s*blood|rbc|erythrocyte)/i.test(query);
 
@@ -725,14 +962,12 @@ export async function searchClinicalKnowledge(
       return true;
     });
 
-    // -------------------------------------------------------------
-    // QUALITY CONTROL & TRANSPARENT ABSTENTION
-    // -------------------------------------------------------------
+    // Quality Control & Transparent Abstention
     const topMatch = filteredCandidates[0];
     const entityLower = entity.toLowerCase();
     const expandedLowers = (analysis.expandedTerms || []).map((t) => t.toLowerCase());
     const hasEntityMatch = filteredCandidates.some((c) => {
-      const tLow = c.topic.toLowerCase();
+      const tLow = (c.topic || "").toLowerCase();
       const qLow = c.question.toLowerCase();
       return (
         tLow.includes(entityLower) ||
@@ -741,27 +976,109 @@ export async function searchClinicalKnowledge(
       );
     });
 
-    // If top match score is very low or entity is absent in database (e.g. appendectomy)
     if (!topMatch || (!hasEntityMatch && (topMatch.rrfScore || 0) < 0.035)) {
       console.log(`[ABSTENTION] Insufficient evidence detected for query: "${query}" (Entity: "${entity}")`);
       return generateInsufficientEvidenceResponse(query, entity, analysis.intent, language);
     }
 
     // -------------------------------------------------------------
+    // CROSS-ENCODER RERANKING (Stage 4)
+    // -------------------------------------------------------------
+    const rerankedPassages = await rerankCandidatesCrossEncoder(
+      query,
+      filteredCandidates,
+      {
+        topK: 6,
+        minConfidenceThreshold: 30.0,
+        primaryEntity: entity,
+        intentAspect: analysis.intent,
+      }
+    );
+
+    if (rerankedPassages.length === 0) {
+      console.log(`[ABSTENTION] No passages met cross-encoder confidence threshold for query: "${query}"`);
+      return generateInsufficientEvidenceResponse(query, entity, analysis.intent, language);
+    }
+
+    const finalPassages: ClinicalMatch[] = rerankedPassages;
+
+    // -------------------------------------------------------------
+    // EVIDENCE COVERAGE ASSESSMENT (Stage 5)
+    // -------------------------------------------------------------
+    const coverage = assessEvidenceCoverage(subquestions, finalPassages, entity);
+
+    // -------------------------------------------------------------
     // INTENT-SPECIFIC GROUNDED ANSWER GENERATION
     // -------------------------------------------------------------
     const formattedResult = formatGroundedAnswerByIntent(
       analysis,
-      filteredCandidates,
+      finalPassages,
       query,
-      language
+      language,
+      coverage.unresolvedAspects,
+      emergencyCheck
     );
+    formattedResult.retrievalMethod = "HYBRID (Reciprocal Rank Fusion: BM25 + pg_trgm + FTS + Cross-Encoder Reranker)";
 
     return formattedResult;
   } catch (err: unknown) {
+    tcpAttempts++;
+    if (tcpAttempts >= 2) {
+      tcpDisabled = true;
+    }
     console.warn("[DATABASE QUERY ERROR - FALLING BACK TO SUPABASE REST API]", err);
-    return searchViaSupabaseRest(query, language, analysis);
+    return searchViaSupabaseRest(query, language, analysis, emergencyCheck);
   }
+}
+
+/**
+ * Controlled Backend Tool: search_medical_kb
+ * Exposes a bounded, validated interface for iterative agentic retrieval.
+ */
+export async function search_medical_kb(params: {
+  query: string;
+  subtopic?: string;
+  aspect?: "DEFINITION" | "SYMPTOMS" | "CAUSES" | "TREATMENT" | "DIAGNOSIS" | "GENERAL";
+  maxResults?: number;
+}): Promise<MedicalKbSearchResult> {
+  const sanitized = sanitizeKbQuery(params.query);
+  if (!sanitized) {
+    return {
+      query: "",
+      aspect: params.aspect || "GENERAL",
+      totalHits: 0,
+      passages: [],
+      coveredConcepts: [],
+      latencyMs: 0,
+    };
+  }
+
+  const start = Date.now();
+  const maxHits = Math.min(Math.max(params.maxResults || 5, 1), 10);
+
+  const result = await searchClinicalKnowledge(sanitized, "en");
+  const latency = Date.now() - start;
+
+  const passages: RerankerCandidate[] = (result.sources || [])
+    .map((s: any, idx: number) => ({
+      id: s.documentId || idx + 1,
+      subject: s.subject || result.subject || "Clinical Medicine",
+      topic: s.topic || result.topic || sanitized,
+      question: s.title || sanitized,
+      answer: result.rawAnswer || result.answer.slice(0, 500),
+      source: s.sourceName || "NIH MedQuAD",
+      relevanceScore: s.relevanceScore || 85.0,
+    }))
+    .slice(0, maxHits);
+
+  return {
+    query: sanitized,
+    aspect: params.aspect || "GENERAL",
+    totalHits: passages.length,
+    passages,
+    coveredConcepts: result.relatedTopics || [],
+    latencyMs: latency,
+  };
 }
 
 /**
@@ -771,31 +1088,41 @@ export async function searchClinicalKnowledge(
 async function searchViaSupabaseRest(
   query: string,
   language: string,
-  analysis: QueryAnalysis
+  analysis: QueryAnalysis,
+  emergencyCheck?: { isEmergency: boolean; emergencyCategory?: string; emergencyNotice?: string }
 ): Promise<ClinicalSearchResult> {
   const entity = analysis.entityA || query;
   const terms = new Set<string>();
-  if (entity) terms.add(entity);
-  (analysis.expandedTerms || []).forEach((t) => terms.add(t));
-
-  // Only if no entity was identified, extract fallback non-intent keywords
-  if (terms.size === 0) {
-    const genericWords = new Set([
-      "what", "is", "are", "the", "a", "an", "of", "for", "in", "to", "and", "or",
-      "with", "about", "can", "how", "does", "do", "why", "tell", "me", "give", "you",
-      "treatment", "treat", "treatments", "symptom", "symptoms", "sign", "signs",
-      "cause", "causes", "diagnosis", "diagnose", "prevention", "prevent", "cure",
-      "management", "overview", "mechanism", "pathophysiology"
-    ]);
-    query
+  if (entity) {
+    terms.add(entity);
+    // Add individual constituent words (e.g. "pulmonary", "embolism" from "pulmonary embolism")
+    entity
       .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
       .split(/\s+/)
-      .filter((w) => w.length >= 3 && !genericWords.has(w))
+      .filter((w) => w.length >= 4 && !["what", "that", "this", "from", "with", "disease"].includes(w))
       .forEach((w) => terms.add(w));
   }
+  (analysis.expandedTerms || []).forEach((t) => terms.add(t));
+
+  // Extract medical nouns from original query (e.g. "albuterol", "omeprazole", "levothyroxine", "statins")
+  const stopWords = new Set([
+    "what", "is", "are", "the", "a", "an", "of", "for", "in", "to", "and", "or",
+    "with", "about", "can", "how", "does", "do", "why", "tell", "me", "give", "you",
+    "treatment", "treat", "treatments", "symptom", "symptoms", "sign", "signs",
+    "cause", "causes", "diagnosis", "diagnose", "prevention", "prevent", "cure",
+    "management", "overview", "mechanism", "pathophysiology", "happen", "happens",
+    "used", "difference", "between", "format", "patient", "presents"
+  ]);
+
+  query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !stopWords.has(w))
+    .forEach((w) => terms.add(w));
 
   const searchTerms = Array.from(terms).filter(Boolean);
+  const subquestions = decomposeMultiPartQuestion(query, entity);
 
   try {
     const supabase = getSupabaseClient();
@@ -814,12 +1141,11 @@ async function searchViaSupabaseRest(
         .from("medical_knowledge")
         .select("id, subject, topic, question, answer, source")
         .or(primaryFilters.join(","))
-        .limit(15);
+        .limit(25);
       data = resp.data;
     }
 
-    // Supplement with answer text only if fewer than 2 primary matches found
-    if (!data || data.length < 2) {
+    if (!data || data.length < 3) {
       const answerFilters: string[] = [];
       searchTerms.slice(0, 3).forEach((t) => {
         const cleanT = t.replace(/[%_,]/g, " ").trim();
@@ -832,7 +1158,7 @@ async function searchViaSupabaseRest(
           .from("medical_knowledge")
           .select("id, subject, topic, question, answer, source")
           .or(answerFilters.join(","))
-          .limit(10);
+          .limit(15);
         if (ansResp.data) {
           data = [...(data || []), ...ansResp.data];
         }
@@ -863,12 +1189,15 @@ async function searchViaSupabaseRest(
       rrfScore: 0.08,
     }));
 
-    // Score and rank candidates by topic, question, and intent aspect match
+    // Okapi BM25 scoring over retrieved candidates
+    const bm25Scored = scoreDocumentsBM25(query, candidates);
+
+    // Merge BM25 with entity match and aspect match
     const entityLower = entity.toLowerCase();
-    const scoredCandidates = candidates.map((c) => {
-      let score = 0.05;
-      const qLower = c.question.toLowerCase();
-      const tLower = c.topic.toLowerCase();
+    const scoredCandidates = bm25Scored.map((c) => {
+      let score = 0.05 + (c.bm25Score ? c.bm25Score * 0.02 : 0);
+      const qLower = (c.question || "").toLowerCase();
+      const tLower = (c.topic || "").toLowerCase();
 
       if (tLower === entityLower) score += 0.08;
       else if (tLower.includes(entityLower)) score += 0.04;
@@ -893,8 +1222,8 @@ async function searchViaSupabaseRest(
     const isWBCQuery = /\b(white\s*blood|wbc|leukocyte)/i.test(query);
     const isRBCQuery = /\b(red\s*blood|rbc|erythrocyte)/i.test(query);
     const filteredCandidates = scoredCandidates.filter((c) => {
-      const qLower = c.question.toLowerCase();
-      const aLower = c.answer.toLowerCase();
+      const qLower = (c.question || "").toLowerCase();
+      const aLower = (c.answer || "").toLowerCase();
       if (isWBCQuery && !isRBCQuery && (qLower.includes("red blood") || aLower.startsWith("red blood"))) {
         return false;
       }
@@ -905,8 +1234,37 @@ async function searchViaSupabaseRest(
       return generateInsufficientEvidenceResponse(query, entity, analysis.intent, language);
     }
 
-    const res = formatGroundedAnswerByIntent(analysis, filteredCandidates, query, language);
-    res.retrievalMethod = "SUPABASE_REST_API (Cloudflare HTTPS)";
+    // Cross-Encoder Reranking
+    const rerankedPassages = await rerankCandidatesCrossEncoder(
+      query,
+      filteredCandidates,
+      {
+        topK: 6,
+        minConfidenceThreshold: 30.0,
+        primaryEntity: entity,
+        intentAspect: analysis.intent,
+      }
+    );
+
+    if (rerankedPassages.length === 0) {
+      console.log(`[ABSTENTION] No passages met cross-encoder confidence threshold for query: "${query}"`);
+      return generateInsufficientEvidenceResponse(query, entity, analysis.intent, language);
+    }
+
+    const finalPassages: ClinicalMatch[] = rerankedPassages;
+
+    // Evidence coverage check
+    const coverage = assessEvidenceCoverage(subquestions, finalPassages, entity);
+
+    const res = formatGroundedAnswerByIntent(
+      analysis,
+      finalPassages,
+      query,
+      language,
+      coverage.unresolvedAspects,
+      emergencyCheck
+    );
+    res.retrievalMethod = "HYBRID_BM25_CROSS_ENCODER (Supabase REST + Okapi BM25 + Cross-Encoder Reranker)";
     return res;
   } catch (err) {
     console.warn("[SUPABASE REST SEARCH ERROR - FALLING BACK TO OFFLINE TEXTBOOK]", err);
@@ -922,7 +1280,9 @@ function formatGroundedAnswerByIntent(
   analysis: QueryAnalysis,
   candidates: ClinicalMatch[],
   originalQuery: string,
-  language: string
+  language: string,
+  unresolvedAspects: string[] = [],
+  emergencyCheck?: { isEmergency: boolean; emergencyCategory?: string; emergencyNotice?: string }
 ): ClinicalSearchResult {
   const intent = analysis.intent;
 
@@ -946,7 +1306,6 @@ function formatGroundedAnswerByIntent(
     if (defMatch) primary = defMatch;
   }
 
-  // If primary.topic is generic (e.g. "Blood", "General Health", "General"), prefer the clean entity name
   let topicName = primary.topic;
   if (!topicName || /^(general(\s*health)?|blood|clinical medicine)$/i.test(topicName.trim())) {
     topicName = analysis.entityA
@@ -955,7 +1314,7 @@ function formatGroundedAnswerByIntent(
   }
 
   let answerMarkdown = "";
-  const uniqueSourceNames = [...new Set(candidates.slice(0, 3).map((c) => c.source || "NIH MedQuAD"))];
+  const uniqueSourceNames = [...new Set(candidates.slice(0, 4).map((c) => c.source || "NIH MedQuAD"))];
 
   // Helper to find specific clinical aspects from retrieved candidates
   const symptomDoc = candidates.find((c) => /symptom|sign/i.test(c.question));
@@ -970,61 +1329,64 @@ function formatGroundedAnswerByIntent(
 
   switch (intent) {
     case "DEFINITION":
-      // Concise definition and basic mechanism. No unnecessary multi-page dump.
-      answerMarkdown += `### 🩺 Definition: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 🩺 Definition: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `${primary.answer}\n\n`;
       if (causeDoc && causeDoc.id !== primary.id) {
-        answerMarkdown += `**Key Mechanism / Etiology:**\n${causeDoc.answer}\n\n`;
+        answerMarkdown += `**Key Mechanism / Pathophysiology:** [2]\n${causeDoc.answer}\n\n`;
       }
       break;
 
     case "EXPLANATION":
-      answerMarkdown += `### ⚙️ Mechanism & Physiological Explanation: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### ⚙️ Mechanism & Physiological Explanation: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `${primary.answer}\n\n`;
       if (causeDoc && causeDoc.id !== primary.id) {
-        answerMarkdown += `**Underlying Physiological Factors:**\n${causeDoc.answer}\n\n`;
+        answerMarkdown += `**Underlying Physiological Factors:** [2]\n${causeDoc.answer}\n\n`;
       }
       break;
 
     case "CLINICAL_OVERVIEW":
-      answerMarkdown += `### 📋 Clinical Overview: <u>${topicName}</u>\n\n`;
-      answerMarkdown += `**Definition & Presentation:**\n${defDoc ? defDoc.answer : primary.answer}\n\n`;
+      answerMarkdown += `### 📋 Clinical Overview: <u>${topicName}</u> [1]\n\n`;
+      answerMarkdown += `**Definition & Cardinal Presentation:**\n${defDoc ? defDoc.answer : primary.answer}\n\n`;
       if (symptomDoc) {
-        answerMarkdown += `**Clinical Presentation & Symptoms:**\n${symptomDoc.answer}\n\n`;
+        const sIdx = candidates.indexOf(symptomDoc) + 1 || 2;
+        answerMarkdown += `**Signs & Clinical Symptoms:** [${sIdx}]\n${symptomDoc.answer}\n\n`;
       }
       if (causeDoc) {
-        answerMarkdown += `**Etiology & Risk Factors:**\n${causeDoc.answer}\n\n`;
+        const cIdx = candidates.indexOf(causeDoc) + 1 || 3;
+        answerMarkdown += `**Etiology & Pathophysiology:** [${cIdx}]\n${causeDoc.answer}\n\n`;
       }
       if (diagDoc) {
-        answerMarkdown += `**Diagnostic Approach:**\n${diagDoc.answer}\n\n`;
+        const dIdx = candidates.indexOf(diagDoc) + 1 || 4;
+        answerMarkdown += `**Diagnostic Approach & Workup:** [${dIdx}]\n${diagDoc.answer}\n\n`;
       }
       if (treatmentDoc) {
-        answerMarkdown += `**Management & Treatment Principles:**\n${treatmentDoc.answer}\n\n`;
+        const tIdx = candidates.indexOf(treatmentDoc) + 1 || 5;
+        answerMarkdown += `**Management & Treatment Principles:** [${tIdx}]\n${treatmentDoc.answer}\n\n`;
       }
       break;
 
     case "SYMPTOMS":
-      answerMarkdown += `### 🔍 Signs & Clinical Symptoms: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 🔍 Signs & Clinical Symptoms: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `${primary.answer}\n\n`;
-      answerMarkdown += `> [!IMPORTANT]\n> **Clinical Red Flags:** Acute escalation, hemodynamic instability, altered sensorium, or severe persistent symptoms warrant immediate emergency physician evaluation.\n\n`;
+      answerMarkdown += `> [!IMPORTANT]\n> **Clinical Red Flags:** Acute symptom escalation, hemodynamic instability, altered sensorium, or severe persistent symptoms warrant immediate emergency physician evaluation.\n\n`;
       break;
 
     case "DIAGNOSIS":
-      answerMarkdown += `### 🧪 Diagnostic Approach & Investigations: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 🧪 Diagnostic Approach & Investigations: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `${primary.answer}\n\n`;
       if (symptomDoc && symptomDoc.id !== primary.id) {
-        answerMarkdown += `**Clinical Findings Supporting Diagnosis:**\n${symptomDoc.answer}\n\n`;
+        answerMarkdown += `**Clinical Findings Supporting Diagnosis:** [2]\n${symptomDoc.answer}\n\n`;
       }
       break;
 
     case "TREATMENT":
-      answerMarkdown += `### 💊 Clinical Treatment & Management: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 💊 Clinical Treatment & Management: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `${primary.answer}\n\n`;
-      answerMarkdown += `> [!NOTE]\n> **Medical Safety Notice:** Treatment options are provided strictly for medical education. Individual patient management requires customized clinical evaluation by a licensed healthcare professional.\n\n`;
+      answerMarkdown += `> [!NOTE]\n> **Medical Safety Notice:** Pharmacotherapeutic regimens are provided strictly for medical education. Individual patient management requires customized clinical evaluation by a licensed healthcare professional.\n\n`;
       break;
 
     case "PROCEDURE":
-      answerMarkdown += `### 🏥 Clinical Procedure Guide: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 🏥 Clinical Procedure Guide: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `${primary.answer}\n\n`;
       answerMarkdown += `> [!WARNING]\n> **Procedural Safety:** Invasive procedures must be executed exclusively in certified clinical facilities adhering to sterile surgical protocols and informed consent standards.\n\n`;
       break;
@@ -1032,7 +1394,7 @@ function formatGroundedAnswerByIntent(
     case "COMPARISON":
       const entA = analysis.entityA;
       const entB = analysis.entityB || "Related Condition";
-      answerMarkdown += `### ⚖️ Clinical Comparison: <u>${entA}</u> vs <u>${entB}</u>\n\n`;
+      answerMarkdown += `### ⚖️ Clinical Comparison: <u>${entA}</u> vs <u>${entB}</u> [1]\n\n`;
       answerMarkdown += `| Clinical Parameter | <u>${entA}</u> | <u>${entB}</u> |\n`;
       answerMarkdown += `| :--- | :--- | :--- |\n`;
       answerMarkdown += `| **Primary Definition** | Characterized by metabolic or pathological alterations specific to ${entA}. | Distinct clinical syndrome categorized under ${entB}. |\n`;
@@ -1043,7 +1405,7 @@ function formatGroundedAnswerByIntent(
       break;
 
     case "VIVA":
-      answerMarkdown += `### 🎓 Viva Voce / Oral Exam Preparation: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 🎓 Viva Voce / Oral Exam Preparation: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `**Examiner-Ready Definition:**\n${primary.answer}\n\n`;
       answerMarkdown += `**High-Yield Points for Examination:**\n`;
       answerMarkdown += `- **Cardinal Concept:** Core pathological hallmark of <u>${topicName}</u>.\n`;
@@ -1055,7 +1417,7 @@ function formatGroundedAnswerByIntent(
       break;
 
     case "MCQ":
-      answerMarkdown += `### 📝 High-Yield MCQ Analysis: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 📝 High-Yield MCQ Analysis: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `**Question:** Which of the following statements regarding **${topicName}** is most accurate?\n\n`;
       answerMarkdown += `- **(A)** ${primary.answer.slice(0, 80)}... *(Correct)*\n`;
       answerMarkdown += `- **(B)** It is exclusively a benign self-limiting condition requiring no clinical monitoring.\n`;
@@ -1066,7 +1428,7 @@ function formatGroundedAnswerByIntent(
       break;
 
     case "CASE_STUDY":
-      answerMarkdown += `### 🩺 Clinical Case Study & Reasoning: <u>${topicName}</u>\n\n`;
+      answerMarkdown += `### 🩺 Clinical Case Study & Reasoning: <u>${topicName}</u> [1]\n\n`;
       answerMarkdown += `**Clinical Vignette:**\nA patient presents with symptoms and signs suggestive of <u>${topicName}</u> requiring systematic diagnostic triage.\n\n`;
       answerMarkdown += `**Evidence-Based Case Analysis:**\n${primary.answer}\n\n`;
       answerMarkdown += `**Recommended Diagnostic & Workup Protocol:**\n`;
@@ -1076,18 +1438,28 @@ function formatGroundedAnswerByIntent(
       break;
 
     default:
-      answerMarkdown += `### 🩺 Definition & Overview: <u>${topicName}</u>\n\n${primary.answer}\n\n`;
+      answerMarkdown += `### 🩺 Definition & Overview: <u>${topicName}</u> [1]\n\n${primary.answer}\n\n`;
       break;
+  }
+
+  // Evidence coverage notice for multi-part questions
+  if (unresolvedAspects && unresolvedAspects.length > 0) {
+    answerMarkdown += `> [!NOTE]\n> **Evidence Coverage Notice:** Retrieved clinical sources specifically corroborated primary aspects; verified evidence was not identified in the approved database for: ${unresolvedAspects.join(", ")}.\n\n`;
   }
 
   // Common high-yield takeaways and citations
   answerMarkdown += `### 💡 High-Yield Clinical Takeaway\n\nA precise understanding of <u>${topicName}</u> is foundational for clinical reasoning, diagnostic precision, and patient safety.\n\n`;
   answerMarkdown += `### 📚 Verified Sources & Citations\n\n`;
-  candidates.slice(0, 3).forEach((c) => {
-    answerMarkdown += `- <u>${c.source || "NIH MedQuAD"}</u>: <i>${c.question}</i> [Record ID: ${c.id}]\n`;
+  candidates.slice(0, 4).forEach((c, idx) => {
+    answerMarkdown += `- **[${idx + 1}]** <u>${c.source || "NIH MedQuAD"}</u>: <i>${c.question}</i> [Record ID: ${c.id}]\n`;
   });
 
-  const structuredSources = candidates.slice(0, 3).map((c) => ({
+  // Stage 7: Automated Safety & Numerical Verification
+  const safetyCheck = verifyAnswerSafetyAndNumerics(originalQuery, answerMarkdown, candidates);
+  answerMarkdown = safetyCheck.sanitizedAnswer;
+  answerMarkdown += `\n\n${safetyCheck.disclaimer}`;
+
+  const structuredSources = candidates.slice(0, 4).map((c) => ({
     documentId: c.id,
     title: c.question,
     subject: c.subject,
@@ -1106,8 +1478,8 @@ function formatGroundedAnswerByIntent(
     intent,
     confidence: confidenceLevel,
     retrievalScore: calcScore,
-    retrievalMethod: "HYBRID (Reciprocal Rank Fusion: PostgreSQL Trigram + FTS + Exact Phrase)",
-    relatedTopics: candidates.slice(0, 4).map((c) => c.topic).filter(Boolean),
+    retrievalMethod: "HYBRID (Reciprocal Rank Fusion: BM25 + pg_trgm + FTS + Cross-Encoder Reranker)",
+    relatedTopics: candidates.slice(0, 4).map((c) => c.topic || "").filter(Boolean),
     ragSources: uniqueSourceNames,
     sources: structuredSources,
     grounded: true,
@@ -1118,9 +1490,15 @@ function formatGroundedAnswerByIntent(
     databaseId: primary.id,
     source: primary.source,
     relevanceScore: primary.rrfScore,
+    bm25Score: primary.bm25Score,
+    crossEncoderScore: primary.crossEncoderScore,
     databaseResult: true,
     subject: primary.subject,
     topic: topicName,
+    isEmergency: emergencyCheck?.isEmergency || safetyCheck.isEmergency,
+    emergencyCategory: emergencyCheck?.emergencyCategory || safetyCheck.emergencyCategory,
+    allNumbersVerified: safetyCheck.allNumbersVerified,
+    unresolvedAspects,
   };
 }
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { searchClinicalKnowledge, getDbPool, getOfflineClinicalKnowledge } from "@/lib/db";
+import { searchClinicalKnowledge, getDbPool, getOfflineClinicalKnowledge, search_medical_kb } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -87,8 +87,15 @@ export async function POST(req: NextRequest) {
     body = {};
   }
 
-  const query = body.message || body.question || "";
+  const query = body.message || body.question || body.query || "";
   const language = body.language || "en";
+
+  // Controlled backend tool invocation: search_medical_kb
+  if (body.tool === "search_medical_kb" || body.action === "search_medical_kb") {
+    const kbParams = body.params || { query, aspect: body.aspect, maxResults: body.maxResults };
+    const toolResult = await search_medical_kb(kbParams);
+    return NextResponse.json(toolResult, { headers: CORS_HEADERS });
+  }
 
   if (!query || typeof query !== "string" || !query.trim()) {
     return NextResponse.json(
@@ -120,7 +127,7 @@ export async function POST(req: NextRequest) {
           question: query,
           language,
         }),
-        signal: AbortSignal.timeout(4000),
+        signal: AbortSignal.timeout(500),
       });
 
       if (backendRes.ok) {
