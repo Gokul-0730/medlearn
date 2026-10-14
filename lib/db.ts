@@ -126,6 +126,10 @@ const MEDICAL_ABBREVIATIONS: Record<string, string> = {
   ida: "iron deficiency anemia",
   afib: "atrial fibrillation",
   dka: "diabetic ketoacidosis",
+  rbc: "red blood cells",
+  wbc: "white blood cells",
+  hgb: "hemoglobin",
+  hb: "hemoglobin",
 };
 
 // Medical Synonyms & Semantic Expansions
@@ -142,10 +146,29 @@ const MEDICAL_SYNONYMS: Record<string, string[]> = {
   "iron deficiency anemia": ["anemia", "iron deficiency", "microcytic anemia"],
   metformin: ["glucophage", "biguanide", "oral hypoglycemic"],
   appendectomy: ["appendix removal", "surgical removal of the appendix"],
+  "red blood cells": ["rbc", "erythrocytes", "erythrocyte", "red blood corpuscles", "blood cells"],
+  "red blood cell": ["rbc", "erythrocyte", "erythrocytes", "blood cells"],
+  erythrocytes: ["red blood cells", "rbc", "erythrocyte"],
+  erythrocyte: ["red blood cell", "rbc", "erythrocytes"],
+  "white blood cells": ["wbc", "leukocytes", "leukocyte", "white blood corpuscles"],
+  "white blood cell": ["wbc", "leukocyte", "leukocytes"],
+  leukocytes: ["white blood cells", "wbc", "leukocyte"],
+  leukocyte: ["white blood cell", "wbc", "leukocytes"],
+  platelets: ["thrombocytes", "thrombocyte"],
+  thrombocytes: ["platelets"],
+  hemoglobin: ["hgb", "hb", "hemoglobin level"],
 };
 
 // Conversational Prefixes sorted by length descending
 const CONVERSATIONAL_PREFIXES = [
+  "explain the structure and function of",
+  "structure and function of",
+  "what are red blood cells and their function",
+  "what are the functions of",
+  "what is the function of",
+  "explain the function of",
+  "what is the role of",
+  "what is the purpose of",
   "give me a clinical overview of",
   "clinical overview of",
   "explain the procedure for",
@@ -171,6 +194,7 @@ const CONVERSATIONAL_PREFIXES = [
   "what is",
   "what are",
   "tell me about",
+  "define",
   "explain",
   "describe",
   "give me information on",
@@ -389,6 +413,7 @@ function extractEntity(q: string): string {
 
   // Strip trailing descriptors
   cleaned = cleaned
+    .replace(/\s+(and their function|and its function|and their role|and its role|structure and function|function and structure)$/i, "")
     .replace(/\s+(diagnosed|for a viva|for viva|viva question|in mcq format|case study)$/i, "")
     .replace(/\s+(works|work|functioning)$/i, "")
     .replace(/[?!.]+$/, "")
@@ -542,19 +567,32 @@ export async function searchClinicalKnowledge(
       .then((r) => r.rows)
       .catch(() => []);
 
-    // Channel 3: Exact Phrase & Substring Match
+    // Channel 3: Exact Phrase & Substring Match with Multi-term Expanded Support
+    const searchTerms = [entity, ...(analysis.expandedTerms || [])].filter(Boolean);
+    const exactClauses: string[] = [
+      "lower(topic) = lower($1)",
+      "lower(question) = lower($2)",
+      "lower(question) LIKE '%' || lower($1) || '%'",
+      "lower(topic) LIKE '%' || lower($1) || '%'"
+    ];
+    const exactParams: (string | number)[] = [entity, query];
+
+    searchTerms.slice(1, 4).forEach((term) => {
+      exactParams.push(term.toLowerCase());
+      const pIdx = exactParams.length;
+      exactClauses.push(`lower(question) LIKE '%' || $${pIdx} || '%'`);
+      exactClauses.push(`lower(topic) LIKE '%' || $${pIdx} || '%'`);
+    });
+
     const exactPromise = pool
       .query(
         `
         SELECT id, subject, topic, question, answer, source
         FROM medical_knowledge
-        WHERE lower(topic) = lower($1)
-           OR lower(question) = lower($2)
-           OR lower(question) LIKE '%' || lower($1) || '%'
-           OR lower(topic) LIKE '%' || lower($1) || '%'
-        LIMIT 15;
+        WHERE ${exactClauses.join(" OR ")}
+        LIMIT 20;
         `,
-        [entity, query]
+        exactParams
       )
       .then((r) => r.rows)
       .catch(() => []);
@@ -647,16 +685,37 @@ export async function searchClinicalKnowledge(
       .sort((a, b) => b[1] - a[1])
       .map(([id, score]) => ({ ...docMap.get(id)!, rrfScore: score }));
 
+    // Negative disambiguation check:
+    // If user specifically asked for "white blood cells", do not accept "red blood cells" if topic is blood
+    const isWBCQuery = /\b(white\s*blood|wbc|leukocyte)/i.test(query);
+    const isRBCQuery = /\b(red\s*blood|rbc|erythrocyte)/i.test(query);
+
+    const filteredCandidates = sortedCandidates.filter((c) => {
+      const qLower = c.question.toLowerCase();
+      const aLower = c.answer.toLowerCase();
+      if (isWBCQuery && !isRBCQuery && (qLower.includes("red blood") || aLower.startsWith("red blood"))) {
+        return false;
+      }
+      return true;
+    });
+
     // -------------------------------------------------------------
     // QUALITY CONTROL & TRANSPARENT ABSTENTION
     // -------------------------------------------------------------
-    const topMatch = sortedCandidates[0];
+    const topMatch = filteredCandidates[0];
     const entityLower = entity.toLowerCase();
-    const hasEntityMatch = sortedCandidates.some(
-      (c) => c.topic.toLowerCase().includes(entityLower) || c.question.toLowerCase().includes(entityLower)
-    );
+    const expandedLowers = (analysis.expandedTerms || []).map((t) => t.toLowerCase());
+    const hasEntityMatch = filteredCandidates.some((c) => {
+      const tLow = c.topic.toLowerCase();
+      const qLow = c.question.toLowerCase();
+      return (
+        tLow.includes(entityLower) ||
+        qLow.includes(entityLower) ||
+        expandedLowers.some((exp) => tLow.includes(exp) || qLow.includes(exp))
+      );
+    });
 
-    // If top match score is very low and entity is absent in database (e.g. appendectomy)
+    // If top match score is very low or entity is absent in database (e.g. appendectomy)
     if (!topMatch || (!hasEntityMatch && (topMatch.rrfScore || 0) < 0.035)) {
       console.log(`[ABSTENTION] Insufficient evidence detected for query: "${query}" (Entity: "${entity}")`);
       return generateInsufficientEvidenceResponse(query, entity, analysis.intent, language);
@@ -667,7 +726,7 @@ export async function searchClinicalKnowledge(
     // -------------------------------------------------------------
     const formattedResult = formatGroundedAnswerByIntent(
       analysis,
-      sortedCandidates,
+      filteredCandidates,
       query,
       language
     );
@@ -690,7 +749,13 @@ function formatGroundedAnswerByIntent(
   language: string
 ): ClinicalSearchResult {
   const primary = candidates[0];
-  const topicName = primary.topic || analysis.entityA || "Clinical Medicine";
+  // If primary.topic is generic (e.g. "Blood", "General Health", "General"), prefer the clean entity name
+  let topicName = primary.topic;
+  if (!topicName || /^(general(\s*health)?|blood|clinical medicine)$/i.test(topicName.trim())) {
+    topicName = analysis.entityA
+      ? analysis.entityA.charAt(0).toUpperCase() + analysis.entityA.slice(1)
+      : primary.topic || "Clinical Medicine";
+  }
   const intent = analysis.intent;
 
   let answerMarkdown = "";
@@ -960,6 +1025,16 @@ export function getOfflineClinicalKnowledge(
     takeaways =
       "Targeting HbA1c < 7.0% alongside blood pressure (< 130/80 mmHg) and lipid management dramatically curbs microvascular end-organ damage.";
     related = ["Endocrinology", "HbA1c Monitoring", "Metformin Therapy", "Insulin Kinetics"];
+  } else if (qLower.includes("red blood") || qLower.includes("erythrocyte") || qLower.includes("rbc")) {
+    topic = "Red Blood Cells (Erythrocytes)";
+    subject = "Hematology & Physiology";
+    definition =
+      "Red blood cells (erythrocytes) are specialized blood cells whose primary physiological function is the transport of oxygen from the lungs to bodily tissues and the reverse transport of carbon dioxide back toward the lungs for expiration.";
+    overview =
+      "**Principal Physiological Functions:**\n1. **Oxygen Delivery:** Each erythrocyte contains ~270 million hemoglobin tetramers. In pulmonary capillaries, hemoglobin binds oxygen with high cooperativity to form oxyhemoglobin, releasing it in peripheral tissues in response to lower partial pressure, acidosis, and elevated 2,3-BPG (Bohr effect).\n2. **Carbon Dioxide Removal:** Facilitates CO2 clearance as bicarbonate (via carbonic anhydrase) and carbaminohemoglobin.\n3. **Biconcave Morphology:** Lacks a nucleus and mitochondria, optimizing surface-area-to-volume ratio and deformability through narrow 5-micrometer microvascular beds.\n\n**Erythropoiesis:** Produced in bone marrow stimulated by renal erythropoietin (EPO), with an average circulation lifespan of ~120 days.";
+    takeaways =
+      "Normal adult reference ranges: ~4.5-5.9 million/mcL in males, ~4.1-5.1 million/mcL in females. Red cell indices (MCV, MCH, MCHC) are critical in diagnosing microcytic, normocytic, and macrocytic anemias.";
+    related = ["Erythropoiesis", "Hemoglobin Kinetics", "Anemia Workup", "Hematocrit"];
   } else {
     // For other queries without specific offline summaries, provide clear guidance
     return generateInsufficientEvidenceResponse(query, currentAnalysis.entityA, currentAnalysis.intent, language);
