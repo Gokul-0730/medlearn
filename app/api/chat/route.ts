@@ -102,6 +102,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Fast path: Handle conversational greetings instantly without backend latency
+  if (/^(hi|hello|hey|good\s*(morning|afternoon|evening)|howdy|greetings|who are you|what is your name|thank you|thanks)\b/i.test(query.toLowerCase().trim())) {
+    const directResult = await searchClinicalKnowledge(query, language);
+    return NextResponse.json(directResult, { headers: CORS_HEADERS });
+  }
+
   // 1. Try external or local Spring Boot backend first (if available)
   const backendUrls = getBackendCandidates();
   for (const bUrl of backendUrls) {
