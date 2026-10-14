@@ -1,7 +1,17 @@
 import { Pool } from "pg";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 let globalPool: Pool | null = null;
 let poolInitFailed = false;
+let cachedSupabaseClient: any = null;
+
+function getSupabaseClient() {
+  if (cachedSupabaseClient) return cachedSupabaseClient;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://iggagkzlvqovfntqbyil.supabase.co";
+  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "sb_publishable_zu7N73ni_rI11Yi3U9E2fA_w_XwoWJO";
+  cachedSupabaseClient = createSupabaseClient(url, key);
+  return cachedSupabaseClient;
+}
 
 export function getDbPool(): Pool | null {
   if (globalPool) {
@@ -520,8 +530,8 @@ export async function searchClinicalKnowledge(
 
   const pool = getDbPool();
   if (!pool) {
-    console.log("[SEARCH] Database connection pool not available, using clinical knowledge base.");
-    return getOfflineClinicalKnowledge(query, language, analysis);
+    console.log("[SEARCH] Database TCP pool not available, querying via Supabase REST API...");
+    return searchViaSupabaseRest(query, language, analysis);
   }
 
   const k = 60; // Standard RRF parameter
@@ -733,7 +743,83 @@ export async function searchClinicalKnowledge(
 
     return formattedResult;
   } catch (err: unknown) {
-    console.warn("[DATABASE QUERY ERROR - FALLING BACK TO CLINICAL KNOWLEDGE BASE]", err);
+    console.warn("[DATABASE QUERY ERROR - FALLING BACK TO SUPABASE REST API]", err);
+    return searchViaSupabaseRest(query, language, analysis);
+  }
+}
+
+/**
+ * Direct HTTPS REST Search via Supabase Client
+ * Guarantees database connectivity across Vercel serverless (IPv4/IPv6) without requiring direct TCP connection pooling.
+ */
+async function searchViaSupabaseRest(
+  query: string,
+  language: string,
+  analysis: QueryAnalysis
+): Promise<ClinicalSearchResult> {
+  const entity = analysis.entityA || query;
+  const searchTerms = [entity, ...(analysis.expandedTerms || [])].filter(Boolean);
+
+  try {
+    const supabase = getSupabaseClient();
+    const orFilters: string[] = [];
+
+    searchTerms.slice(0, 5).forEach((t) => {
+      const cleanT = t.replace(/[%_,]/g, " ").trim();
+      if (cleanT.length >= 3) {
+        orFilters.push(`question.ilike.%${cleanT}%`);
+        orFilters.push(`topic.ilike.%${cleanT}%`);
+        orFilters.push(`answer.ilike.%${cleanT}%`);
+      }
+    });
+
+    let data: any[] | null = null;
+    if (orFilters.length > 0) {
+      const resp = await supabase
+        .from("medical_knowledge")
+        .select("id, subject, topic, question, answer, source")
+        .or(orFilters.join(","))
+        .limit(10);
+      data = resp.data;
+    }
+
+    if (!data || data.length === 0) {
+      console.log(`[SUPABASE REST] No matching records found for "${query}"`);
+      return getOfflineClinicalKnowledge(query, language, analysis);
+    }
+
+    const candidates: ClinicalMatch[] = data.map((r: any) => ({
+      id: Number(r.id),
+      subject: r.subject || "General Health",
+      topic: r.topic || "Clinical Medicine",
+      question: r.question || "",
+      answer: cleanClinicalText(r.answer || ""),
+      source: r.source || "NIH MedQuAD",
+      relevanceScore: 0.08,
+      rrfScore: 0.08,
+    }));
+
+    // Negative disambiguation check
+    const isWBCQuery = /\b(white\s*blood|wbc|leukocyte)/i.test(query);
+    const isRBCQuery = /\b(red\s*blood|rbc|erythrocyte)/i.test(query);
+    const filteredCandidates = candidates.filter((c) => {
+      const qLower = c.question.toLowerCase();
+      const aLower = c.answer.toLowerCase();
+      if (isWBCQuery && !isRBCQuery && (qLower.includes("red blood") || aLower.startsWith("red blood"))) {
+        return false;
+      }
+      return true;
+    });
+
+    if (filteredCandidates.length === 0) {
+      return generateInsufficientEvidenceResponse(query, entity, analysis.intent, language);
+    }
+
+    const res = formatGroundedAnswerByIntent(analysis, filteredCandidates, query, language);
+    res.retrievalMethod = "SUPABASE_REST_API (Cloudflare HTTPS)";
+    return res;
+  } catch (err) {
+    console.warn("[SUPABASE REST SEARCH ERROR - FALLING BACK TO OFFLINE TEXTBOOK]", err);
     return getOfflineClinicalKnowledge(query, language, analysis);
   }
 }
