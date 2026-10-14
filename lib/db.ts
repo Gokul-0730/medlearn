@@ -762,25 +762,44 @@ async function searchViaSupabaseRest(
 
   try {
     const supabase = getSupabaseClient();
-    const orFilters: string[] = [];
-
+    const primaryFilters: string[] = [];
     searchTerms.slice(0, 5).forEach((t) => {
       const cleanT = t.replace(/[%_,]/g, " ").trim();
       if (cleanT.length >= 3) {
-        orFilters.push(`question.ilike.%${cleanT}%`);
-        orFilters.push(`topic.ilike.%${cleanT}%`);
-        orFilters.push(`answer.ilike.%${cleanT}%`);
+        primaryFilters.push(`question.ilike.%${cleanT}%`);
+        primaryFilters.push(`topic.ilike.%${cleanT}%`);
       }
     });
 
     let data: any[] | null = null;
-    if (orFilters.length > 0) {
+    if (primaryFilters.length > 0) {
       const resp = await supabase
         .from("medical_knowledge")
         .select("id, subject, topic, question, answer, source")
-        .or(orFilters.join(","))
+        .or(primaryFilters.join(","))
         .limit(10);
       data = resp.data;
+    }
+
+    // Supplement with answer text only if fewer than 2 primary matches found
+    if (!data || data.length < 2) {
+      const answerFilters: string[] = [];
+      searchTerms.slice(0, 3).forEach((t) => {
+        const cleanT = t.replace(/[%_,]/g, " ").trim();
+        if (cleanT.length >= 3) {
+          answerFilters.push(`answer.ilike.%${cleanT}%`);
+        }
+      });
+      if (answerFilters.length > 0) {
+        const ansResp = await supabase
+          .from("medical_knowledge")
+          .select("id, subject, topic, question, answer, source")
+          .or(answerFilters.join(","))
+          .limit(10);
+        if (ansResp.data) {
+          data = [...(data || []), ...ansResp.data];
+        }
+      }
     }
 
     if (!data || data.length === 0) {
