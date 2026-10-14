@@ -51,9 +51,9 @@ export function getDbPool(): Pool | null {
       ssl: {
         rejectUnauthorized: false,
       },
-      max: 5,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 6000,
+      max: 3,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 3000,
     });
 
     return globalPool;
@@ -694,6 +694,12 @@ export async function searchClinicalKnowledge(
     const sortedCandidates = Array.from(rrfScores.entries())
       .sort((a, b) => b[1] - a[1])
       .map(([id, score]) => ({ ...docMap.get(id)!, rrfScore: score }));
+
+    // If TCP pool returned 0 rows (e.g. IPv6 unreachability in Vercel serverless), fall back to HTTPS REST
+    if (sortedCandidates.length === 0) {
+      console.log(`[SEARCH] TCP pool returned 0 rows for "${query}", falling back to Supabase REST over HTTPS...`);
+      return searchViaSupabaseRest(query, language, analysis);
+    }
 
     // Negative disambiguation check:
     // If user specifically asked for "white blood cells", do not accept "red blood cells" if topic is blood
