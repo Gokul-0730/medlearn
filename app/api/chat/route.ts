@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { searchClinicalKnowledge, getDbPool } from "@/lib/db";
+import { searchClinicalKnowledge, getDbPool, getOfflineClinicalKnowledge } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,19 +54,21 @@ export async function GET() {
   // Fallback: Test direct PostgreSQL database connection
   try {
     const pool = getDbPool();
-    const dbTest = await pool.query("SELECT 1 as alive;");
-    if (dbTest.rows.length > 0) {
-      return NextResponse.json(
-        {
-          status: "UP",
-          message: "Medical Chatbot API is running (Supabase Direct)",
-          mode: "database-direct",
-        },
-        { headers: CORS_HEADERS }
-      );
+    if (pool) {
+      const dbTest = await pool.query("SELECT 1 as alive;");
+      if (dbTest.rows.length > 0) {
+        return NextResponse.json(
+          {
+            status: "UP",
+            message: "Medical Chatbot API is running (Supabase Direct)",
+            mode: "database-direct",
+          },
+          { headers: CORS_HEADERS }
+        );
+      }
     }
-  } catch (err: any) {
-    console.error("[HEALTHCHECK DB ERROR]", err?.message);
+  } catch (err: unknown) {
+    console.error("[HEALTHCHECK DB ERROR]", (err as Error)?.message);
   }
 
   return NextResponse.json(
@@ -126,24 +128,9 @@ export async function POST(req: NextRequest) {
   try {
     const directResult = await searchClinicalKnowledge(query, language);
     return NextResponse.json(directResult, { headers: CORS_HEADERS });
-  } catch (dbErr: any) {
-    console.error("[CHAT ROUTE DATABASE FALLBACK ERROR]", dbErr);
-    return NextResponse.json(
-      {
-        success: false,
-        isError: true,
-        errorType: "DATABASE_ERROR",
-        reply:
-          language === "ta"
-            ? "மருத்துவ அறிவுத் தளத்தில் தற்காலிக பிழை ஏற்பட்டது. தயவுசெய்து சிறிது நேரம் கழித்து முயற்சிக்கவும்."
-            : "Medical knowledge query temporarily unavailable. Please try again shortly.",
-        answer:
-          language === "ta"
-            ? "மருத்துவ அறிவுத் தளத்தில் தற்காலிக பிழை ஏற்பட்டது. தயவுசெய்து சிறிது நேரம் கழித்து முயற்சிக்கவும்."
-            : "Medical knowledge query temporarily unavailable. Please try again shortly.",
-        errorDetails: dbErr?.message || "Database connection error",
-      },
-      { status: 500, headers: CORS_HEADERS }
-    );
+  } catch (dbErr: unknown) {
+    console.warn("[CHAT ROUTE DATABASE WARN - RESILIENT FALLBACK]", dbErr);
+    const fallbackResult = getOfflineClinicalKnowledge(query, language);
+    return NextResponse.json(fallbackResult, { headers: CORS_HEADERS });
   }
 }
