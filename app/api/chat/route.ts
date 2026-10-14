@@ -12,8 +12,10 @@ function getBackendCandidates(): string[] {
   if (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.includes("localhost")) {
     list.push(process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, ""));
   }
-  // If running locally, check standard Spring Boot port
-  list.push("http://127.0.0.1:8080");
+  // Only check localhost Spring Boot when running in local development (not on Vercel serverless)
+  if (!process.env.VERCEL) {
+    list.push("http://127.0.0.1:8080");
+  }
   return list;
 }
 
@@ -100,7 +102,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 1. Try external or local Spring Boot backend first
+  // 1. Try external or local Spring Boot backend first (if available)
   const backendUrls = getBackendCandidates();
   for (const bUrl of backendUrls) {
     try {
@@ -112,7 +114,7 @@ export async function POST(req: NextRequest) {
           question: query,
           language,
         }),
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(4000),
       });
 
       if (backendRes.ok) {
